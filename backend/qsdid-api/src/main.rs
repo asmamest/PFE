@@ -2,7 +2,7 @@
 //! Post-Quantum Hybrid Signatures (ML-DSA-65 + Ed25519)
 
 use axum::{
-    extract::{Path, Query, Multipart},
+    extract::{Path, Query},
     response::{Json, IntoResponse},
     http::StatusCode,
     Router, routing::{get, post, delete},
@@ -11,8 +11,9 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-use tracing::{info, error, debug};
+use tracing::{info, debug};
 use tower_http::cors::{CorsLayer, Any};
+use base64::Engine;
 
 use hybrid_signer::{HybridSigner, HybridVerifier, CompositeSignature, CustomCompositeJwk};
 
@@ -22,16 +23,7 @@ use hybrid_signer::{HybridSigner, HybridVerifier, CompositeSignature, CustomComp
 
 #[derive(Clone)]
 struct AppState {
-    keys: Arc<Mutex<HashMap<String, KeyEntry>>>,
     signatures: Arc<Mutex<HashMap<String, SignatureEntry>>>,
-}
-
-#[derive(Clone)]
-struct KeyEntry {
-    key_id: String,
-    key_pair: hybrid_signer::HybridKeyPair,
-    composite_jwk: CustomCompositeJwk,
-    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Clone)]
@@ -50,7 +42,6 @@ struct SignatureEntry {
 #[derive(Debug, Deserialize)]
 struct SignRequest {
     document: String,  // Base64 encoded document
-    key_id: String,
     document_name: Option<String>,
 }
 
@@ -61,30 +52,21 @@ struct SignResponse {
     document_hash: String,
     signature_size: usize,
     algorithms: Vec<String>,
-    timestamp: u64,
+    timestamp: i64,
+    signing_time_ms: u128,
 }
 
 #[derive(Debug, Deserialize)]
 struct VerifyRequest {
     signature_id: String,
     document: String,  // Base64 encoded document
-    key_id: String,
 }
 
 #[derive(Debug, Serialize)]
 struct VerifyResponse {
     valid: bool,
     message: String,
-    verification_time_ms: u64,
-}
-
-#[derive(Debug, Serialize)]
-struct KeyResponse {
-    key_id: String,
-    pq_public_key: String,      // hex encoded
-    classical_public_key: String, // hex encoded
-    composite_jwk: CustomCompositeJwk,
-    created_at: String,
+    verification_time_ms: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -95,11 +77,17 @@ struct HealthResponse {
     features: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct StatsResponse {
+    total_signatures: usize,
+    algorithms: serde_json::Value,
+    key_sizes: serde_json::Value,
+}
+
 // ============================================================================
 // API Handlers
 // ============================================================================
 
-/// Health check endpoint
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "healthy".to_string(),
@@ -116,7 +104,6 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-/// Generate a new hybrid key pair
 async fn generate_keys(Query(params): Query<HashMap<String, String>>) -> impl IntoResponse {
     let count = params.get("count").and_then(|c| c.parse().ok()).unwrap_or(1);
     
@@ -128,12 +115,12 @@ async fn generate_keys(Query(params): Query<HashMap<String, String>>) -> impl In
     
     let mut keys = Vec::new();
     
-    for _ in 0..count {
+    for i in 0..count {
         match HybridSigner::generate() {
             Ok(signer) => {
                 let key_pair = signer.get_key_pair();
                 let composite_jwk = signer.export_composite_jwk();
-                let key_id = format!("key_{}", Uuid::new_v4().simple());
+                let key_id = format!("key_{}_{}", Uuid::new_v4().simple(), i);
                 
                 keys.push(serde_json::json!({
                     "key_id": key_id,
@@ -158,7 +145,6 @@ async fn generate_keys(Query(params): Query<HashMap<String, String>>) -> impl In
     })))
 }
 
-/// Sign a document
 async fn sign_document(
     state: axum::extract::State<AppState>,
     Json(req): Json<SignRequest>,
@@ -166,7 +152,7 @@ async fn sign_document(
     let start = std::time::Instant::now();
     
     // Decode base64 document
-    let document = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
+    let document_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
         Ok(d) => d,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
@@ -175,19 +161,7 @@ async fn sign_document(
         }
     };
     
-    // Check if key exists
-    let key_exists = {
-        let keys = state.keys.lock().unwrap();
-        keys.contains_key(&req.key_id)
-    };
-    
-    if !key_exists {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": format!("Key '{}' not found", req.key_id)
-        })));
-    }
-    
-    // Generate new key pair for this signature (in production, use stored keys)
+    // Generate signer
     let signer = match HybridSigner::generate() {
         Ok(s) => s,
         Err(e) => {
@@ -197,8 +171,8 @@ async fn sign_document(
         }
     };
     
-    // Sign the document
-    let signature = match signer.sign_composite(&document) {
+    // Sign
+    let signature = match signer.sign_composite(&document_bytes) {
         Ok(s) => s,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
@@ -207,7 +181,7 @@ async fn sign_document(
         }
     };
     
-    // Serialize signature to JSON
+    // Serialize
     let signature_json = match signature.to_json() {
         Ok(j) => j,
         Err(e) => {
@@ -217,7 +191,7 @@ async fn sign_document(
         }
     };
     
-    // Store signature
+    // Store
     let signature_id = format!("sig_{}", Uuid::new_v4().simple());
     let document_hash_hex = hex::encode(&signature.document_hash);
     let signature_size = signature.pq_signature.len() + signature.classical_signature.len();
@@ -251,7 +225,6 @@ async fn sign_document(
     })))
 }
 
-/// Verify a signature
 async fn verify_signature(
     state: axum::extract::State<AppState>,
     Json(req): Json<VerifyRequest>,
@@ -274,7 +247,7 @@ async fn verify_signature(
     };
     
     // Decode document
-    let document = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
+    let document_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
         Ok(d) => d,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
@@ -283,7 +256,8 @@ async fn verify_signature(
         }
     };
     
-    // Create verifier (in production, use key from storage)
+    // Create verifier with the public key from the signature
+    // For production, you would retrieve the key from storage
     let signer = match HybridSigner::generate() {
         Ok(s) => s,
         Err(e) => {
@@ -304,13 +278,14 @@ async fn verify_signature(
     };
     
     // Verify
-    let is_valid = match verifier.verify_composite(&document, &signature_entry.signature) {
+    let is_valid = match verifier.verify_composite(&document_bytes, &signature_entry.signature) {
         Ok(valid) => valid,
         Err(e) => {
+            let elapsed = start.elapsed();
             return (StatusCode::OK, Json(serde_json::json!({
                 "valid": false,
                 "message": format!("Verification failed: {}", e),
-                "verification_time_ms": start.elapsed().as_millis(),
+                "verification_time_ms": elapsed.as_millis(),
             })));
         }
     };
@@ -326,7 +301,6 @@ async fn verify_signature(
     })))
 }
 
-/// Get signature details
 async fn get_signature(
     state: axum::extract::State<AppState>,
     Path(signature_id): Path<String>,
@@ -354,7 +328,6 @@ async fn get_signature(
     }
 }
 
-/// Delete a signature
 async fn delete_signature(
     state: axum::extract::State<AppState>,
     Path(signature_id): Path<String>,
@@ -373,7 +346,6 @@ async fn delete_signature(
     }
 }
 
-/// List all signatures
 async fn list_signatures(state: axum::extract::State<AppState>) -> impl IntoResponse {
     let signatures = state.signatures.lock().unwrap();
     
@@ -393,30 +365,24 @@ async fn list_signatures(state: axum::extract::State<AppState>) -> impl IntoResp
     }))
 }
 
-/// Get statistics
-async fn get_stats(state: axum::extract::State<AppState>) -> impl IntoResponse {
+async fn get_stats(state: axum::extract::State<AppState>) -> Json<StatsResponse> {
     let signatures = state.signatures.lock().unwrap();
     
-    let total_signatures = signatures.len();
-    let total_keys = {
-        let keys = state.keys.lock().unwrap();
-        keys.len()
-    };
-    
-    Json(serde_json::json!({
-        "total_signatures": total_signatures,
-        "total_keys": total_keys,
-        "algorithms": {
+    Json(StatsResponse {
+        total_signatures: signatures.len(),
+        algorithms: serde_json::json!({
             "ml_dsa_65": true,
             "ed25519": true,
             "hybrid_wns": true
-        },
-        "key_sizes": {
+        }),
+        key_sizes: serde_json::json!({
             "pq_public_key": 1952,
             "classical_public_key": 32,
-            "signature": 3373
-        }
-    }))
+            "signature_total": 3373,
+            "signature_pq": 3309,
+            "signature_classical": 64
+        }),
+    })
 }
 
 // ============================================================================
@@ -425,27 +391,22 @@ async fn get_stats(state: axum::extract::State<AppState>) -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() {
-    // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter("qsdid_api=debug,tower_http=debug")
+        .with_env_filter("qsdid_api=info,tower_http=debug")
         .init();
     
     info!("🚀 QSDID Platform API Starting...");
     info!("📦 Version: {}", env!("CARGO_PKG_VERSION"));
     
-    // Create application state
     let state = AppState {
-        keys: Arc::new(Mutex::new(HashMap::new())),
         signatures: Arc::new(Mutex::new(HashMap::new())),
     };
     
-    // Configure CORS
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
     
-    // Build router
     let app = Router::new()
         .route("/health", get(health))
         .route("/keys/generate", post(generate_keys))
@@ -462,16 +423,14 @@ async fn main() {
     info!("🌐 Listening on http://{}", addr);
     info!("📝 Available endpoints:");
     info!("   GET  /health                 - Health check");
-    info!("   POST /keys/generate          - Generate hybrid keys");
-    info!("   POST /sign                   - Sign a document");
+    info!("   POST /keys/generate?count=N  - Generate hybrid keys");
+    info!("   POST /sign                   - Sign a document (base64)");
     info!("   POST /verify                 - Verify a signature");
     info!("   GET  /signatures             - List all signatures");
-    info!("   GET  /signatures/{id}        - Get signature details");
-    info!("   DELETE /signatures/{id}      - Delete a signature");
+    info!("   GET  /signatures/{{id}}       - Get signature details");
+    info!("   DELETE /signatures/{{id}}     - Delete a signature");
     info!("   GET  /stats                  - Get statistics");
     
-    axum::Server::bind(&addr.parse().unwrap())
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
