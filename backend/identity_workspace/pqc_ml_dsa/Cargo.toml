@@ -1,0 +1,24 @@
+[package]
+name = "pqc_ml_dsa"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description.workspace = true
+
+
+
+[dependencies]
+oqs = "0.11"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+
+# Optionnel : pour conversion JWK (compatible identity_jose)
+identity_jose = { path = "../identity_jose", optional = true }
+
+[features]
+default = []
+jwk = ["dep:identity_jose"]
