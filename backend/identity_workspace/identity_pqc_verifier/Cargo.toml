@@ -1,0 +1,15 @@
+[package]
+name = "identity_pqc_verifier"
+authors.workspace = true
+edition.workspace = true
+# homepage.workspace = true
+keywords = [ "identity", "jose", "jwk", "jws"]
+license.workspace = true
+readme = "./README.md"
+repository.workspace = true
+
+description = "JWS PQC signature verification "
+
+[dependencies]
+identity_jose = {path = "../identity_jose", default-features = true }
+oqs.workspace = true
