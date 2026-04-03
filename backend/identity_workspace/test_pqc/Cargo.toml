@@ -1,7 +1,13 @@
 [package]
 name = "test_pqc"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description.workspace = true
 
 [dependencies]
 pqc_ml_dsa = { path = "../pqc_ml_dsa" }

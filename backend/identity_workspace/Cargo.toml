@@ -9,7 +9,7 @@ members = [
     "identity_pqc_verifier",
     "identity_jose",
     "identity_storage",
-    "pqc_ml_dsa", "test_pqc", "hybrid_signer",
+    "pqc_ml_dsa", "test_pqc", "hybrid_signer", "qsdid-api",
 ]
 
 [workspace.package]
@@ -27,6 +27,10 @@ description = "Quantum-Secure Decentralized Identity Platform"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0.18"
+bls12_381_plus = "0.8.17"
+json-proof-token = { version = "0.4" }
+
 rand = "0.10.0"
 oqs = { version = "0.11.0", default-features = true, features = ["vendored"] }
 strum = "0.24.1"
+product_common = { git = "https://github.com/iotaledger/product-core.git", tag = "v0.8.14", package = "product_common" }
