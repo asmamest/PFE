@@ -1,0 +1,15 @@
+[package]
+name = "identity_pqc_verifier"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+description.workspace = true
+
+
+[dependencies]
+identity_jose = {path = "../identity_jose", default-features = true }
+oqs.workspace = true
