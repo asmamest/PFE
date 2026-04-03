@@ -1,0 +1,9 @@
+[package]
+name = "identity_document"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+identity_core = { path = "../identity_core" }
+identity_did = { path = "../identity_did" }
+serde = { workspace = true }

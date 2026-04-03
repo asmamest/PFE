@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "identity_core",
+    "identity_did",
+    "identity_credential",
+    "identity_document",
+    "identity_verification",
+    "identity_pqc_verifier",
+    "identity_jose",
+    "identity_storage",
+    "pqc_ml_dsa", "test_pqc", "hybrid_signer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Asma Mestaysser"]
+license = "Apache-2.0"
+repository = "https://github.com/yourusername/qsdid-platform"
+homepage = "https://github.com/yourusername/qsdid-platform"
+readme = "README.md"
+description = "Quantum-Secure Decentralized Identity Platform"
+
+[workspace.dependencies]
+# Dependencies communes
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0.18"
+rand = "0.10.0"
+oqs = { version = "0.11.0", default-features = true, features = ["vendored"] }
+strum = "0.24.1"

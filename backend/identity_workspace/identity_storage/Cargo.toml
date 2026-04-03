@@ -1,0 +1,8 @@
+[package]
+name = "identity_storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+identity_core = { path = "../identity_core" }
+serde = { workspace = true }

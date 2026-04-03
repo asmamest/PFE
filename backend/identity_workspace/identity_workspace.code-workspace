@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"name": "identity_workspace",
+			"path": "."
+		},
+		{
+			"name": "identity_jose",
+			"path": "../../../identity/identity_jose"
+		},
+		{
+			"name": "vcpkg",
+			"path": "../../../identity/vcpkg"
+		}
+	],
+	"settings": {}
+}

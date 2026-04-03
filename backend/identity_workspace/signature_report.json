@@ -1,0 +1,57 @@
+{
+  "algorithm": "ML-DSA-65 (NIST FIPS 204)",
+  "documents": [
+    {
+      "file_name": "certificat.pdf",
+      "file_size_bytes": 643437,
+      "file_type": "PDF Document",
+      "signature_size_bytes": 3309,
+      "timestamp": 1775145187,
+      "verification_status": "pending"
+    },
+    {
+      "file_name": "image.jpg",
+      "file_size_bytes": 243392,
+      "file_type": "JPEG Image",
+      "signature_size_bytes": 3309,
+      "timestamp": 1775145187,
+      "verification_status": "pending"
+    },
+    {
+      "file_name": "sample_credential.json",
+      "file_size_bytes": 281,
+      "file_type": "JSON Data",
+      "signature_size_bytes": 3309,
+      "timestamp": 1775145187,
+      "verification_status": "pending"
+    },
+    {
+      "file_name": "sample_credential.sig.json",
+      "file_size_bytes": 45321,
+      "file_type": "JSON Data",
+      "signature_size_bytes": 3309,
+      "timestamp": 1775145187,
+      "verification_status": "pending"
+    },
+    {
+      "file_name": "sample_document.sig.json",
+      "file_size_bytes": 45317,
+      "file_type": "JSON Data",
+      "signature_size_bytes": 3309,
+      "timestamp": 1775145187,
+      "verification_status": "pending"
+    },
+    {
+      "file_name": "sample_document.txt",
+      "file_size_bytes": 317,
+      "file_type": "Text Document",
+      "signature_size_bytes": 3309,
+      "timestamp": 1775145187,
+      "verification_status": "pending"
+    }
+  ],
+  "generated_at": "2026-04-02T15:53:07.485759213+00:00",
+  "platform": "QSDID Platform",
+  "security_level": "Level 2 (AES-128 equivalent)",
+  "total_documents": 6
+}
