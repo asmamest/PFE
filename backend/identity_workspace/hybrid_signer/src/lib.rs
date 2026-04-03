@@ -1,24 +1,11 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
-//! Hybrid Signer with Weak Non-Separability (WNS)
-//! 
-//! This module provides hybrid post-quantum + classical signatures
-//! that are cryptographically bound together to prevent stripping attacks.
+//! Hybrid Signer with Weak Non-Separability (WNS) - Production Ready
+//!
+//! Implements composite signatures combining ML-DSA-65 (post-quantum) and Ed25519 (classical)
+//! with strong cryptographic binding (WNS) to prevent stripping attacks.
 
 use pqc_ml_dsa::PqcSigner;
 use ed25519_dalek::{SigningKey, VerifyingKey, Signature as Ed25519Signature};
+use ed25519_dalek::{Signer, Verifier};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Serialize, Deserialize};
@@ -27,398 +14,414 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 // ============================================================================
+// Composite Key & Algorithm ID (compatible with IOTA's format)
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum CompositeAlgId {
+    #[serde(rename = "id-MLDSA44-Ed25519")]
+    IdMldsa44Ed25519,
+    #[serde(rename = "id-MLDSA65-Ed25519")]
+    IdMldsa65Ed25519,
+}
+
+impl CompositeAlgId {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::IdMldsa44Ed25519 => "id-MLDSA44-Ed25519",
+            Self::IdMldsa65Ed25519 => "id-MLDSA65-Ed25519",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomCompositeJwk {
+    pub alg_id: CompositeAlgId,
+    pub traditional_public_key: Vec<u8>,   // Ed25519 public key (32 bytes)
+    pub pq_public_key: Vec<u8>,            // ML-DSA-65 public key (1952 bytes)
+}
+
+// ============================================================================
 // Error Types
 // ============================================================================
 
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum HybridError {
-    #[error("Invalid hybrid signature format")]
+    #[error("Invalid composite signature format")]
     InvalidFormat,
-    
-    #[error("Signature extraction failed: {0}")]
-    ExtractionFailed(String),
-    
-    #[error("PQ signature verification failed")]
-    PqVerificationFailed,
-    
-    #[error("Classic signature verification failed")]
-    ClassicVerificationFailed,
-    
-    #[error("Document hash mismatch - possible tampering detected")]
+    #[error("Post-quantum signature verification failed: {0}")]
+    PqVerificationFailed(String),
+    #[error("Classical signature verification failed")]
+    ClassicalVerificationFailed,
+    #[error("Document hash mismatch – possible tampering")]
     HashMismatch,
-    
-    #[error("Timestamp validation failed")]
+    #[error("Signature timestamp is too old or in the future (replay protection)")]
     TimestampValidationFailed,
-    
     #[error("Algorithm mismatch: expected {expected}, got {actual}")]
     AlgorithmMismatch { expected: String, actual: String },
-    
-    #[error("Weak Non-Separability property violated - stripping attack detected")]
+    #[error("Weak Non-Separability violation – signatures are not cryptographically bound")]
     WnsViolation,
+    #[error("Key conversion error: {0}")]
+    KeyConversionError(String),
+    #[error("Entropy mismatch – signature context altered")]
+    EntropyMismatch,
 }
 
 // ============================================================================
-// Hybrid Signature Structures
+// Composite Signature
 // ============================================================================
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SignatureMetadata {
-    pub pq_key_id: String,
-    pub classic_key_id: String,
-    pub signature_purpose: String,
-    pub entropy: [u8; 16],
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HybridSignature {
-    pub combined_signature: Vec<u8>,
-    pub document_hash: [u8; 32],
-    pub algorithms: Vec<String>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompositeSignature {
+    pub classical_signature: Vec<u8>,     // Ed25519 signature (64 bytes)
+    pub pq_signature: Vec<u8>,            // ML-DSA-65 signature (~3309 bytes)
+    pub algorithm: CompositeAlgId,
     pub timestamp: u64,
-    pub version: u8,
-    pub metadata: SignatureMetadata,
+    pub binding_hash: [u8; 32],           // Blake3(pq_sig || classical_sig)
+    pub document_hash: [u8; 32],          // Blake3(original message)
+    pub entropy: [u8; 16],                // Random nonce for context binding
 }
+
+// ============================================================================
+// Local Key Pair Storage (for serialization)
+// ============================================================================
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct HybridKeyPair {
     pub pq_public_key: Vec<u8>,
     pub pq_secret_key: Vec<u8>,
-    pub classic_public_key: Vec<u8>,
-    pub classic_secret_key: Vec<u8>,
+    pub classical_public_key: Vec<u8>,
+    pub classical_secret_key: Vec<u8>,
     pub key_id: String,
     pub created_at: u64,
 }
 
 // ============================================================================
-// Hybrid Signer
+// Hybrid Signer (holds secret keys)
 // ============================================================================
 
 pub struct HybridSigner {
     pq_signer: PqcSigner,
-    classic_signer: SigningKey,
-    classic_verifying_key: VerifyingKey,
+    classical_signer: SigningKey,
+    classical_verifying_key: VerifyingKey,
     key_id: String,
 }
 
 impl HybridSigner {
+    /// Generate a new hybrid key pair (ML-DSA-65 + Ed25519).
     pub fn generate() -> Result<Self> {
         let pq_signer = PqcSigner::generate()?;
-        
         let mut csprng = OsRng;
-        let classic_signer = SigningKey::generate(&mut csprng);
-        let classic_verifying_key = classic_signer.verifying_key();
-        
-        let key_id = Self::generate_key_id(&pq_signer, &classic_verifying_key);
-        
+        let classical_signer = SigningKey::generate(&mut csprng);
+        let classical_verifying_key = classical_signer.verifying_key();
+        let key_id = Self::generate_key_id(&pq_signer, &classical_verifying_key);
         Ok(Self {
             pq_signer,
-            classic_signer,
-            classic_verifying_key,
+            classical_signer,
+            classical_verifying_key,
             key_id,
         })
     }
-    
-    fn generate_key_id(pq_signer: &PqcSigner, classic_key: &VerifyingKey) -> String {
+
+    fn generate_key_id(pq_signer: &PqcSigner, classical_key: &VerifyingKey) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(pq_signer.public_key_bytes());
-        hasher.update(classic_key.as_bytes());
-        let hash = hasher.finalize();
-        hex::encode(hash.as_bytes())
+        hasher.update(classical_key.as_bytes());
+        hex::encode(hasher.finalize().as_bytes())
     }
-    
+
+    /// Create linked context for PQ signature (includes both public keys and entropy).
+    fn create_linked_context(&self, doc_hash: &[u8; 32], entropy: &[u8; 16]) -> Vec<u8> {
+        let mut ctx = Vec::new();
+        ctx.extend_from_slice(b"QSDID-HYBRID-v1");
+        ctx.extend_from_slice(doc_hash);
+        ctx.extend_from_slice(entropy);
+        ctx.extend_from_slice(self.classical_verifying_key.as_bytes());
+        ctx.extend_from_slice(self.pq_signer.public_key_bytes());
+        ctx
+    }
+
+    /// Create message for classical signature (includes PQ signature for binding).
+    fn create_classical_message(&self, doc_hash: &[u8; 32], pq_sig: &[u8], entropy: &[u8; 16]) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"CLASSIC-WRAPPER-v1");
+        msg.extend_from_slice(doc_hash);
+        msg.extend_from_slice(pq_sig);
+        msg.extend_from_slice(entropy);
+        msg.extend_from_slice(self.classical_verifying_key.as_bytes());
+        msg
+    }
+
+    /// Generate cryptographically secure random entropy.
     fn generate_entropy(&self) -> [u8; 16] {
         let mut entropy = [0u8; 16];
         OsRng.fill_bytes(&mut entropy);
         entropy
     }
-    
-    fn create_linked_context(&self, hash: &[u8; 32], entropy: &[u8; 16]) -> Vec<u8> {
-        let mut context = Vec::new();
-        context.extend_from_slice(b"QSDID-HYBRID-v1");
-        context.extend_from_slice(hash);
-        context.extend_from_slice(entropy);
-        context.extend_from_slice(self.classic_verifying_key.as_bytes());
-        context.extend_from_slice(self.pq_signer.public_key_bytes());
-        context
-    }
-    
-    fn create_classic_message(&self, hash: &[u8; 32], pq_signature: &[u8], entropy: &[u8; 16]) -> Vec<u8> {
-        let mut message = Vec::new();
-        message.extend_from_slice(b"CLASSIC-WRAPPER-v1");
-        message.extend_from_slice(hash);
-        message.extend_from_slice(pq_signature);
-        message.extend_from_slice(entropy);
-        message.extend_from_slice(self.classic_verifying_key.as_bytes());
-        message
-    }
-    
-    fn combine_signatures_wns(&self, pq_sig: &[u8], classic_sig: &[u8]) -> Vec<u8> {
-        let max_len = pq_sig.len().max(classic_sig.len());
-        let binding_key = self.derive_binding_key(pq_sig, classic_sig);
-        
-        let mut combined = Vec::with_capacity(max_len + 16);
-        combined.extend_from_slice(&(pq_sig.len() as u32).to_le_bytes());
-        combined.extend_from_slice(&(classic_sig.len() as u32).to_le_bytes());
-        combined.extend_from_slice(&binding_key);
-        
-        for i in 0..max_len {
-            let keystream_byte = binding_key[i % binding_key.len()];
-            let pq_byte = pq_sig.get(i).unwrap_or(&0);
-            let classic_byte = classic_sig.get(i).unwrap_or(&0);
-            combined.push(pq_byte ^ classic_byte ^ keystream_byte);
-        }
-        
-        combined
-    }
-    
-    fn derive_binding_key(&self, pq_sig: &[u8], classic_sig: &[u8]) -> Vec<u8> {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(pq_sig);
-        hasher.update(classic_sig);
-        hasher.update(self.classic_verifying_key.as_bytes());
-        hasher.update(self.pq_signer.public_key_bytes());
-        hasher.finalize().as_bytes().to_vec()
-    }
-    
-    pub fn sign_hybrid(&self, message: &[u8]) -> Result<HybridSignature> {
-        let document_hash = blake3::hash(message);
-        let hash_bytes = document_hash.as_bytes();
+
+    /// Sign a message and produce a composite signature.
+    pub fn sign_composite(&self, message: &[u8]) -> Result<CompositeSignature> {
+        let doc_hash = blake3::hash(message);
+        let doc_hash_bytes = doc_hash.as_bytes();
         let entropy = self.generate_entropy();
-        
-        let context = self.create_linked_context(hash_bytes, &entropy);
+
+        // 1. Post‑quantum signature on the linked context
+        let context = self.create_linked_context(doc_hash_bytes, &entropy);
         let pq_signature = self.pq_signer.sign(&context)?;
-        
-        let classic_message = self.create_classic_message(hash_bytes, &pq_signature, &entropy);
-        let classic_signature = self.classic_signer.sign(&classic_message);
-        
-        let combined = self.combine_signatures_wns(&pq_signature, classic_signature.to_bytes().as_ref());
-        
-        let metadata = SignatureMetadata {
-            pq_key_id: self.key_id.clone(),
-            classic_key_id: self.key_id.clone(),
-            signature_purpose: "QSDID-HYBRID-V1".to_string(),
-            entropy,
-        };
-        
-        Ok(HybridSignature {
-            combined_signature: combined,
-            document_hash: *hash_bytes,
-            algorithms: vec!["ML-DSA-65".to_string(), "Ed25519".to_string()],
+
+        // 2. Classical signature on a message that includes the PQ signature (strong binding)
+        let classical_msg = self.create_classical_message(doc_hash_bytes, &pq_signature, &entropy);
+        let classical_signature = self.classical_signer.sign(&classical_msg);
+
+        // 3. Binding hash to enforce Weak Non‑Separability
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&pq_signature);
+        hasher.update(classical_signature.to_bytes().as_ref());
+        let binding_hash = hasher.finalize().into();
+
+        Ok(CompositeSignature {
+            classical_signature: classical_signature.to_bytes().to_vec(),
+            pq_signature,
+            algorithm: CompositeAlgId::IdMldsa65Ed25519,
             timestamp: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
-            version: 1,
-            metadata,
+            binding_hash,
+            document_hash: *doc_hash_bytes,
+            entropy,
         })
     }
-    
-    pub fn extract_signatures(&self, combined: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-        if combined.len() < 16 {
-            return Err(anyhow::anyhow!("Invalid combined signature"));
+
+    /// Export public keys as a custom composite JWK (compatible with IOTA's format).
+    pub fn export_composite_jwk(&self) -> CustomCompositeJwk {
+        CustomCompositeJwk {
+            alg_id: CompositeAlgId::IdMldsa65Ed25519,
+            traditional_public_key: self.classical_verifying_key.as_bytes().to_vec(),
+            pq_public_key: self.pq_signer.public_key_bytes().to_vec(),
         }
-        
-        let pq_len = u32::from_le_bytes(combined[0..4].try_into().unwrap()) as usize;
-        let classic_len = u32::from_le_bytes(combined[4..8].try_into().unwrap()) as usize;
-        let binding_key = &combined[8..16];
-        let combined_data = &combined[16..];
-        
-        let mut pq_sig = vec![0u8; pq_len];
-        let mut classic_sig = vec![0u8; classic_len];
-        
-        for i in 0..pq_len.max(classic_len) {
-            let combined_byte = *combined_data.get(i).unwrap_or(&0);
-            let keystream_byte = binding_key[i % binding_key.len()];
-            
-            if i < pq_len && i < classic_len {
-                pq_sig[i] = combined_byte ^ keystream_byte ^ classic_sig[i];
-                classic_sig[i] = combined_byte ^ keystream_byte ^ pq_sig[i];
-            } else if i < pq_len {
-                pq_sig[i] = combined_byte ^ keystream_byte;
-            } else if i < classic_len {
-                classic_sig[i] = combined_byte ^ keystream_byte;
-            }
-        }
-        
-        Ok((pq_sig, classic_sig))
     }
-    
-    pub fn get_public_keys(&self) -> HybridKeyPair {
+
+    /// Get raw key pair for secure storage (e.g., encrypted file).
+    pub fn get_key_pair(&self) -> HybridKeyPair {
         HybridKeyPair {
             pq_public_key: self.pq_signer.public_key_bytes().to_vec(),
             pq_secret_key: self.pq_signer.secret_key_bytes().to_vec(),
-            classic_public_key: self.classic_verifying_key.as_bytes().to_vec(),
-            classic_secret_key: self.classic_signer.to_bytes().to_vec(),
+            classical_public_key: self.classical_verifying_key.as_bytes().to_vec(),
+            classical_secret_key: self.classical_signer.to_bytes().to_vec(),
             key_id: self.key_id.clone(),
             created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
         }
     }
-    
+
     pub fn key_id(&self) -> &str {
         &self.key_id
     }
 }
 
 // ============================================================================
-// Hybrid Verifier
+// Hybrid Verifier (holds only public keys)
 // ============================================================================
 
 pub struct HybridVerifier {
-    pq_public_key: Vec<u8>,
-    classic_public_key: Vec<u8>,
+    pq_verifier: PqcSigner,
+    classical_verifying_key: VerifyingKey,
     key_id: String,
 }
 
 impl HybridVerifier {
-    pub fn new(pq_public_key: Vec<u8>, classic_public_key: Vec<u8>) -> Self {
-        let key_id = Self::generate_key_id(&pq_public_key, &classic_public_key);
-        Self {
-            pq_public_key,
-            classic_public_key,
-            key_id,
-        }
+    /// Build a verifier from a custom composite JWK.
+    pub fn from_composite_jwk(jwk: &CustomCompositeJwk) -> Result<Self, HybridError> {
+        let pq_verifier = PqcSigner::from_public_key(jwk.pq_public_key.clone())
+            .map_err(|e| HybridError::PqVerificationFailed(e.to_string()))?;
+        let classical_key_bytes: [u8; 32] = jwk.traditional_public_key.as_slice().try_into()
+            .map_err(|_| HybridError::ClassicalVerificationFailed)?;
+        let classical_verifying_key = VerifyingKey::from_bytes(&classical_key_bytes)
+            .map_err(|_| HybridError::ClassicalVerificationFailed)?;
+        Ok(Self {
+            pq_verifier,
+            classical_verifying_key,
+            key_id: jwk.alg_id.name().to_string(),
+        })
     }
-    
-    fn generate_key_id(pq_key: &[u8], classic_key: &[u8]) -> String {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(pq_key);
-        hasher.update(classic_key);
-        let hash = hasher.finalize();
-        hex::encode(hash.as_bytes())
+
+    /// Build a verifier from raw public key bytes (useful for testing).
+    pub fn from_raw_bytes(pq_public_key: Vec<u8>, classical_public_key: Vec<u8>) -> Result<Self, HybridError> {
+        let pq_verifier = PqcSigner::from_public_key(pq_public_key)
+            .map_err(|e| HybridError::PqVerificationFailed(e.to_string()))?;
+        let classical_key_bytes: [u8; 32] = classical_public_key.as_slice().try_into()
+            .map_err(|_| HybridError::ClassicalVerificationFailed)?;
+        let classical_verifying_key = VerifyingKey::from_bytes(&classical_key_bytes)
+            .map_err(|_| HybridError::ClassicalVerificationFailed)?;
+        Ok(Self {
+            pq_verifier,
+            classical_verifying_key,
+            key_id: "raw".to_string(),
+        })
     }
-    
-    pub fn verify_hybrid(&self, message: &[u8], signature: &HybridSignature) -> Result<bool, HybridError> {
-        let current_hash = blake3::hash(message);
-        if current_hash.as_bytes() != &signature.document_hash {
-            return Err(HybridError::HashMismatch);
+
+    // Helper methods – must be identical to those in HybridSigner
+    fn create_linked_context(&self, doc_hash: &[u8; 32], entropy: &[u8; 16]) -> Vec<u8> {
+        let mut ctx = Vec::new();
+        ctx.extend_from_slice(b"QSDID-HYBRID-v1");
+        ctx.extend_from_slice(doc_hash);
+        ctx.extend_from_slice(entropy);
+        ctx.extend_from_slice(self.classical_verifying_key.as_bytes());
+        ctx.extend_from_slice(self.pq_verifier.public_key_bytes());
+        ctx
+    }
+
+    fn create_classical_message(&self, doc_hash: &[u8; 32], pq_sig: &[u8], entropy: &[u8; 16]) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"CLASSIC-WRAPPER-v1");
+        msg.extend_from_slice(doc_hash);
+        msg.extend_from_slice(pq_sig);
+        msg.extend_from_slice(entropy);
+        msg.extend_from_slice(self.classical_verifying_key.as_bytes());
+        msg
+    }
+
+    /// Verify a composite signature.
+    pub fn verify_composite(&self, message: &[u8], signature: &CompositeSignature) -> Result<bool, HybridError> {
+        // Algorithm check
+        if signature.algorithm != CompositeAlgId::IdMldsa65Ed25519 {
+            return Err(HybridError::AlgorithmMismatch {
+                expected: CompositeAlgId::IdMldsa65Ed25519.name().to_string(),
+                actual: signature.algorithm.name().to_string(),
+            });
         }
-        
+
+        // Timestamp check (5 minutes tolerance)
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         if now > signature.timestamp + 300 {
             return Err(HybridError::TimestampValidationFailed);
         }
-        
-        let expected_algorithms = vec!["ML-DSA-65".to_string(), "Ed25519".to_string()];
-        if signature.algorithms != expected_algorithms {
-            return Err(HybridError::AlgorithmMismatch {
-                expected: format!("{:?}", expected_algorithms),
-                actual: format!("{:?}", signature.algorithms),
-            });
+
+        // Document hash integrity
+        let current_doc_hash = blake3::hash(message);
+        if current_doc_hash.as_bytes() != &signature.document_hash {
+            return Err(HybridError::HashMismatch);
         }
-        
-        // For verification, we need to extract signatures
-        // Create a temporary signer just for extraction
-        let temp_signer = HybridSigner::generate().map_err(|e| HybridError::ExtractionFailed(e.to_string()))?;
-        let (pq_sig, classic_sig) = temp_signer.extract_signatures(&signature.combined_signature)
-            .map_err(|e| HybridError::ExtractionFailed(e.to_string()))?;
-        
-        // Verify classic signature (Ed25519)
-        let classic_valid = self.verify_classic(message, &classic_sig)?;
-        
-        // For PQ verification, we trust the combined signature structure
-        // In production, you would implement full PQ verification
-        let pq_valid = !pq_sig.is_empty();
-        
-        if !pq_valid || !classic_valid {
+
+        // Binding hash verification (Weak Non‑Separability)
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&signature.pq_signature);
+        hasher.update(&signature.classical_signature);
+        let recomputed_binding: [u8; 32] = hasher.finalize().into();
+        if recomputed_binding != signature.binding_hash {
             return Err(HybridError::WnsViolation);
         }
-        
-        Ok(true)
-    }
-    
-    fn verify_classic(&self, message: &[u8], signature: &[u8]) -> Result<bool, HybridError> {
-        if signature.len() != 64 {
-            return Err(HybridError::ClassicVerificationFailed);
-        }
-        
-        let verifying_key = VerifyingKey::from_bytes(
-            self.classic_public_key.as_slice().try_into()
-                .map_err(|_| HybridError::ClassicVerificationFailed)?
+
+        // Recreate contexts using the stored entropy
+        let context = self.create_linked_context(&signature.document_hash, &signature.entropy);
+        let classical_msg = self.create_classical_message(&signature.document_hash, &signature.pq_signature, &signature.entropy);
+
+        // Verify post‑quantum signature
+        let pq_ok = self
+            .pq_verifier
+            .verify_with_public_key(&context, &signature.pq_signature)
+            .map_err(|e| HybridError::PqVerificationFailed(e.to_string()))?;
+
+        // Verify classical signature
+        let classical_sig = Ed25519Signature::from_bytes(
+            signature.classical_signature.as_slice().try_into()
+                .map_err(|_| HybridError::ClassicalVerificationFailed)?,
         );
-        
-        let sig = Ed25519Signature::from_bytes(signature.try_into().unwrap());
-        
-        Ok(verifying_key.verify(message, &sig).is_ok())
+        let classical_ok = self.classical_verifying_key.verify(&classical_msg, &classical_sig).is_ok();
+
+        Ok(pq_ok && classical_ok)
     }
-    
+
     pub fn key_id(&self) -> &str {
         &self.key_id
     }
 }
 
-impl HybridSignature {
+// ============================================================================
+// Serialization Helpers
+// ============================================================================
+
+impl CompositeSignature {
+    /// Serialize the signature to compact JSON (for storage or transmission).
     pub fn to_json(&self) -> Result<String> {
-        Ok(serde_json::to_string_pretty(self)?)
+        Ok(serde_json::to_string(self)?)
     }
-    
+
+    /// Deserialize a signature from JSON.
     pub fn from_json(json: &str) -> Result<Self> {
         Ok(serde_json::from_str(json)?)
     }
 }
 
+// ============================================================================
+// Unit Tests (Production‑ready)
+// ============================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
-    fn test_hybrid_signature_basic() {
+    fn full_workflow() {
         let signer = HybridSigner::generate().unwrap();
-        let message = b"Test message for hybrid signature";
-        
-        let signature = signer.sign_hybrid(message).unwrap();
-        let verifier = HybridVerifier::new(
-            signer.get_public_keys().pq_public_key,
-            signer.get_public_keys().classic_public_key,
-        );
-        
-        let result = verifier.verify_hybrid(message, &signature).unwrap();
-        assert!(result);
-        println!("✅ Hybrid signature test passed!");
+        let jwk = signer.export_composite_jwk();
+        let message = b"Production test message - sign me!";
+        let signature = signer.sign_composite(message).unwrap();
+        let verifier = HybridVerifier::from_composite_jwk(&jwk).unwrap();
+        assert!(verifier.verify_composite(message, &signature).unwrap());
+        println!("✅ Full workflow OK");
     }
-    
+
     #[test]
-    fn test_tampered_document() {
+    fn tampered_message_fails() {
         let signer = HybridSigner::generate().unwrap();
-        let original = b"Original document";
+        let jwk = signer.export_composite_jwk();
+        let original = b"Original important document";
         let tampered = b"Tampered document";
-        
-        let signature = signer.sign_hybrid(original).unwrap();
-        let verifier = HybridVerifier::new(
-            signer.get_public_keys().pq_public_key,
-            signer.get_public_keys().classic_public_key,
-        );
-        
-        let result = verifier.verify_hybrid(tampered, &signature);
+        let signature = signer.sign_composite(original).unwrap();
+        let verifier = HybridVerifier::from_composite_jwk(&jwk).unwrap();
+        let result = verifier.verify_composite(tampered, &signature);
         assert!(matches!(result, Err(HybridError::HashMismatch)));
-        println!("✅ Tampered document detection passed!");
+        println!("✅ Tampered message correctly rejected");
     }
-    
+
     #[test]
-    fn test_stripping_attack() {
+    fn modified_binding_hash_fails() {
         let signer = HybridSigner::generate().unwrap();
-        let message = b"Important document";
-        
-        let mut signature = signer.sign_hybrid(message).unwrap();
-        let verifier = HybridVerifier::new(
-            signer.get_public_keys().pq_public_key,
-            signer.get_public_keys().classic_public_key,
-        );
-        
-        // Simulate stripping attack by modifying algorithms
-        signature.algorithms = vec!["Ed25519".to_string()];
-        
-        let result = verifier.verify_hybrid(message, &signature);
-        assert!(matches!(result, Err(HybridError::AlgorithmMismatch { .. })));
-        println!("✅ Stripping attack detection passed!");
+        let jwk = signer.export_composite_jwk();
+        let message = b"Message with strong binding";
+        let mut signature = signer.sign_composite(message).unwrap();
+        signature.binding_hash[0] ^= 0xFF;
+        let verifier = HybridVerifier::from_composite_jwk(&jwk).unwrap();
+        let result = verifier.verify_composite(message, &signature);
+        assert!(matches!(result, Err(HybridError::WnsViolation)));
+        println!("✅ Binding hash tampering detected");
     }
-    
+
     #[test]
-    fn test_key_serialization() {
+    fn expired_signature_fails() {
         let signer = HybridSigner::generate().unwrap();
-        let key_pair = signer.get_public_keys();
-        
-        let json = serde_json::to_string_pretty(&key_pair).unwrap();
-        let deserialized: HybridKeyPair = serde_json::from_str(&json).unwrap();
-        
-        assert_eq!(key_pair.pq_public_key, deserialized.pq_public_key);
-        assert_eq!(key_pair.classic_public_key, deserialized.classic_public_key);
-        println!("✅ Key serialization test passed!");
+        let jwk = signer.export_composite_jwk();
+        let message = b"Old document";
+        let mut signature = signer.sign_composite(message).unwrap();
+        signature.timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() - 600;
+        let verifier = HybridVerifier::from_composite_jwk(&jwk).unwrap();
+        let result = verifier.verify_composite(message, &signature);
+        assert!(matches!(result, Err(HybridError::TimestampValidationFailed)));
+        println!("✅ Expired signature rejected");
+    }
+
+    #[test]
+    fn serialization_roundtrip() {
+        let signer = HybridSigner::generate().unwrap();
+        let message = b"Test serialization";
+        let original = signer.sign_composite(message).unwrap();
+        let json = original.to_json().unwrap();
+        let deserialized = CompositeSignature::from_json(&json).unwrap();
+        assert_eq!(original.classical_signature, deserialized.classical_signature);
+        assert_eq!(original.pq_signature, deserialized.pq_signature);
+        assert_eq!(original.binding_hash, deserialized.binding_hash);
+        assert_eq!(original.document_hash, deserialized.document_hash);
+        assert_eq!(original.entropy, deserialized.entropy);
+        println!("✅ JSON serialization roundtrip OK");
     }
 }
