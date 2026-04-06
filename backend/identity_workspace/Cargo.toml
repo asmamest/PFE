@@ -9,7 +9,7 @@ members = [
     "identity_pqc_verifier",
     "identity_jose",
     "identity_storage",
-    "pqc_ml_dsa", "test_pqc", "hybrid_signer", "qsdid-api",
+    "pqc_ml_dsa", "test_pqc", "hybrid_signer",  "pqc_ml_kem",
 ]
 
 [workspace.package]
@@ -30,7 +30,11 @@ thiserror = "2.0.18"
 bls12_381_plus = "0.8.17"
 json-proof-token = { version = "0.4" }
 
-rand = "0.10.0"
+rand = { version = "0.8.5", features = ["std", "std_rng"] }
 oqs = { version = "0.11.0", default-features = true, features = ["vendored"] }
 strum = "0.24.1"
 product_common = { git = "https://github.com/iotaledger/product-core.git", tag = "v0.8.14", package = "product_common" }
+anyhow = "1.0.102"
+hex = "0.4.3"
+aes-gcm = "0.10"
+rand_core = "0.6.4"
