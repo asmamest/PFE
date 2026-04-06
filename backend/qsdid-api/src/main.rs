@@ -1,5 +1,9 @@
 //! QSDID Platform REST API
-//! Post-Quantum Hybrid Signatures (ML-DSA-65 + Ed25519)
+//! - Hybrid signatures (ML-DSA-65 + Ed25519) with WNS
+//! - Post-quantum key exchange (ML-KEM-768) with authenticated encryption
+
+//! QSDID Platform REST API
+//! Post-Quantum Hybrid Signatures (ML-DSA-65 + Ed25519) + KEM
 
 use axum::{
     extract::{Path, Query},
@@ -11,11 +15,12 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-use tracing::{info, debug};
+use tracing::{info};
 use tower_http::cors::{CorsLayer, Any};
 use base64::Engine;
 
 use hybrid_signer::{HybridSigner, HybridVerifier, CompositeSignature, CustomCompositeJwk};
+use pqc_ml_kem::{MlKem768, EncryptedMessage, KeyPair as KemKeyPair};
 
 // ============================================================================
 // Application State
@@ -24,6 +29,7 @@ use hybrid_signer::{HybridSigner, HybridVerifier, CompositeSignature, CustomComp
 #[derive(Clone)]
 struct AppState {
     signatures: Arc<Mutex<HashMap<String, SignatureEntry>>>,
+    kem_keys: Arc<Mutex<HashMap<String, KemKeyPair>>>,
 }
 
 #[derive(Clone)]
@@ -31,6 +37,8 @@ struct SignatureEntry {
     signature_id: String,
     document_hash: String,
     signature: CompositeSignature,
+    /// Stocker la clé publique composite pour la vérification
+    public_key_jwk: CustomCompositeJwk,
     created_at: chrono::DateTime<chrono::Utc>,
     document_name: Option<String>,
 }
@@ -69,80 +77,39 @@ struct VerifyResponse {
     verification_time_ms: u128,
 }
 
-#[derive(Debug, Serialize)]
-struct HealthResponse {
-    status: String,
-    version: String,
-    algorithms: Vec<String>,
-    features: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct StatsResponse {
-    total_signatures: usize,
-    algorithms: serde_json::Value,
-    key_sizes: serde_json::Value,
-}
-
 // ============================================================================
 // API Handlers
 // ============================================================================
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "healthy".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        algorithms: vec![
-            "ML-DSA-65 (post-quantum)".to_string(),
-            "Ed25519 (classical)".to_string(),
-        ],
-        features: vec![
-            "Weak Non-Separability (WNS)".to_string(),
-            "Composite Signatures".to_string(),
-            "Replay Protection".to_string(),
-        ],
-    })
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "healthy",
+        "version": env!("CARGO_PKG_VERSION"),
+        "algorithms": ["ML-DSA-65", "Ed25519", "ML-KEM-768"],
+        "features": ["Weak Non-Separability (WNS)", "Composite Signatures", "Post-Quantum Encryption"]
+    }))
 }
 
-async fn generate_keys(Query(params): Query<HashMap<String, String>>) -> impl IntoResponse {
-    let count = params.get("count").and_then(|c| c.parse().ok()).unwrap_or(1);
-    
-    if count > 10 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "Maximum 10 keys per request"
-        })));
-    }
-    
-    let mut keys = Vec::new();
-    
-    for i in 0..count {
-        match HybridSigner::generate() {
-            Ok(signer) => {
-                let key_pair = signer.get_key_pair();
-                let composite_jwk = signer.export_composite_jwk();
-                let key_id = format!("key_{}_{}", Uuid::new_v4().simple(), i);
-                
-                keys.push(serde_json::json!({
-                    "key_id": key_id,
-                    "pq_public_key": hex::encode(&key_pair.pq_public_key),
-                    "classical_public_key": hex::encode(&key_pair.classical_public_key),
-                    "pq_public_key_size": key_pair.pq_public_key.len(),
-                    "classical_public_key_size": key_pair.classical_public_key.len(),
-                    "composite_jwk": composite_jwk,
-                }));
-            }
-            Err(e) => {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                    "error": format!("Key generation failed: {}", e)
-                })));
-            }
+async fn generate_keys() -> impl IntoResponse {
+    match HybridSigner::generate() {
+        Ok(signer) => {
+            let key_pair = signer.get_key_pair();
+            let composite_jwk = signer.export_composite_jwk();
+            let key_id = format!("key_{}", Uuid::new_v4().simple());
+            
+            (StatusCode::CREATED, Json(serde_json::json!({
+                "key_id": key_id,
+                "pq_public_key": hex::encode(&key_pair.pq_public_key),
+                "classical_public_key": hex::encode(&key_pair.classical_public_key),
+                "pq_public_key_size": key_pair.pq_public_key.len(),
+                "classical_public_key_size": key_pair.classical_public_key.len(),
+                "composite_jwk": composite_jwk,
+            })))
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("Key generation failed: {}", e)
+        }))),
     }
-    
-    (StatusCode::CREATED, Json(serde_json::json!({
-        "keys": keys,
-        "count": keys.len()
-    })))
 }
 
 async fn sign_document(
@@ -151,54 +118,40 @@ async fn sign_document(
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
     
-    // Decode base64 document
     let document_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
         Ok(d) => d,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": format!("Invalid base64 document: {}", e)
-            })));
-        }
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid base64: {}", e)
+        }))),
     };
     
-    // Generate signer
     let signer = match HybridSigner::generate() {
         Ok(s) => s,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to create signer: {}", e)
-            })));
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("Signer failed: {}", e)
+        }))),
     };
     
-    // Sign
+    // Récupérer la clé publique AVANT de signer
+    let public_key_jwk = signer.export_composite_jwk();
+    
     let signature = match signer.sign_composite(&document_bytes) {
         Ok(s) => s,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Signing failed: {}", e)
-            })));
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("Signing failed: {}", e)
+        }))),
     };
     
-    // Serialize
     let signature_json = match signature.to_json() {
         Ok(j) => j,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Serialization failed: {}", e)
-            })));
-        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("Serialization failed: {}", e)
+        }))),
     };
     
-    // Store
     let signature_id = format!("sig_{}", Uuid::new_v4().simple());
     let document_hash_hex = hex::encode(&signature.document_hash);
     let signature_size = signature.pq_signature.len() + signature.classical_signature.len();
-    let algorithms = vec![
-        signature.algorithm.name().to_string(),
-        "Ed25519".to_string(),
-    ];
     
     {
         let mut signatures = state.signatures.lock().unwrap();
@@ -206,6 +159,7 @@ async fn sign_document(
             signature_id: signature_id.clone(),
             document_hash: document_hash_hex.clone(),
             signature,
+            public_key_jwk,
             created_at: chrono::Utc::now(),
             document_name: req.document_name,
         });
@@ -219,7 +173,7 @@ async fn sign_document(
         "signature_json": signature_json,
         "document_hash": document_hash_hex,
         "signature_size": signature_size,
-        "algorithms": algorithms,
+        "algorithms": vec!["ML-DSA-65", "Ed25519"],
         "timestamp": chrono::Utc::now().timestamp(),
         "signing_time_ms": elapsed.as_millis(),
     })))
@@ -231,7 +185,6 @@ async fn verify_signature(
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
     
-    // Get signature
     let signature_entry = {
         let signatures = state.signatures.lock().unwrap();
         signatures.get(&req.signature_id).cloned()
@@ -239,36 +192,20 @@ async fn verify_signature(
     
     let signature_entry = match signature_entry {
         Some(s) => s,
-        None => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": format!("Signature '{}' not found", req.signature_id)
-            })));
-        }
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": format!("Signature '{}' not found", req.signature_id)
+        }))),
     };
     
-    // Decode document
     let document_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
         Ok(d) => d,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": format!("Invalid base64 document: {}", e)
-            })));
-        }
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid base64: {}", e)
+        }))),
     };
     
-    // Create verifier with the public key from the signature
-    // For production, you would retrieve the key from storage
-    let signer = match HybridSigner::generate() {
-        Ok(s) => s,
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "error": format!("Failed to create signer: {}", e)
-            })));
-        }
-    };
-    let jwk = signer.export_composite_jwk();
-    
-    let verifier = match HybridVerifier::from_composite_jwk(&jwk) {
+    // CRÉER UN VÉRIFICATEUR AVEC LA CLÉ PUBLIQUE STOCKÉE
+    let verifier = match HybridVerifier::from_composite_jwk(&signature_entry.public_key_jwk) {
         Ok(v) => v,
         Err(e) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
@@ -277,7 +214,6 @@ async fn verify_signature(
         }
     };
     
-    // Verify
     let is_valid = match verifier.verify_composite(&document_bytes, &signature_entry.signature) {
         Ok(valid) => valid,
         Err(e) => {
@@ -320,11 +256,9 @@ async fn get_signature(
                 "timestamp": entry.signature.timestamp,
             })))
         }
-        None => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": format!("Signature '{}' not found", signature_id)
-            })))
-        }
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": format!("Signature '{}' not found", signature_id)
+        }))),
     }
 }
 
@@ -365,24 +299,182 @@ async fn list_signatures(state: axum::extract::State<AppState>) -> impl IntoResp
     }))
 }
 
-async fn get_stats(state: axum::extract::State<AppState>) -> Json<StatsResponse> {
+async fn get_stats(state: axum::extract::State<AppState>) -> Json<serde_json::Value> {
     let signatures = state.signatures.lock().unwrap();
     
-    Json(StatsResponse {
-        total_signatures: signatures.len(),
-        algorithms: serde_json::json!({
+    Json(serde_json::json!({
+        "total_signatures": signatures.len(),
+        "algorithms": {
             "ml_dsa_65": true,
             "ed25519": true,
-            "hybrid_wns": true
-        }),
-        key_sizes: serde_json::json!({
+            "hybrid_wns": true,
+            "ml_kem_768": true
+        },
+        "key_sizes": {
             "pq_public_key": 1952,
             "classical_public_key": 32,
             "signature_total": 3373,
-            "signature_pq": 3309,
-            "signature_classical": 64
-        }),
-    })
+            "kem_public_key": 1184,
+            "kem_secret_key": 2400,
+            "kem_ciphertext": 1088
+        }
+    }))
+}
+
+// ============================================================================
+// KEM Handlers
+// ============================================================================
+
+async fn kem_generate() -> impl IntoResponse {
+    match MlKem768::generate() {
+        Ok(kp) => {
+            (StatusCode::CREATED, Json(serde_json::json!({
+                "public_key": hex::encode(&kp.public_key),
+                "secret_key": hex::encode(&kp.secret_key),
+                "public_key_size": kp.public_key.len(),
+                "secret_key_size": kp.secret_key.len(),
+            })))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("KEM generation failed: {}", e)
+        }))),
+    }
+}
+
+async fn kem_encapsulate(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+    let pub_key_hex = req.get("public_key").and_then(|v| v.as_str()).unwrap_or("");
+    let pub_key = match hex::decode(pub_key_hex) {
+        Ok(k) => k,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid hex public key: {}", e)
+        }))),
+    };
+    
+    match MlKem768::encapsulate(&pub_key) {
+        Ok(res) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "shared_secret": hex::encode(&res.shared_secret),
+                "ciphertext": hex::encode(&res.ciphertext.data),
+            })))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Encapsulation failed: {}", e)
+        }))),
+    }
+}
+
+async fn kem_decapsulate(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+    let secret_key_hex = req.get("secret_key").and_then(|v| v.as_str()).unwrap_or("");
+    let ciphertext_hex = req.get("ciphertext").and_then(|v| v.as_str()).unwrap_or("");
+    
+    let secret_key = match hex::decode(secret_key_hex) {
+        Ok(k) => k,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid hex secret key: {}", e)
+        }))),
+    };
+    
+    let ciphertext = match hex::decode(ciphertext_hex) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid hex ciphertext: {}", e)
+        }))),
+    };
+    
+    match MlKem768::decapsulate(&secret_key, &ciphertext) {
+        Ok(secret) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "shared_secret": hex::encode(&secret),
+            })))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Decapsulation failed: {}", e)
+        }))),
+    }
+}
+
+async fn kem_encrypt(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+    let pub_key_hex = req.get("public_key").and_then(|v| v.as_str()).unwrap_or("");
+    let plaintext_b64 = req.get("plaintext").and_then(|v| v.as_str()).unwrap_or("");
+    
+    let pub_key = match hex::decode(pub_key_hex) {
+        Ok(k) => k,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid hex public key: {}", e)
+        }))),
+    };
+    
+    let plaintext = match base64::engine::general_purpose::STANDARD.decode(plaintext_b64) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid base64 plaintext: {}", e)
+        }))),
+    };
+    
+    match MlKem768::encrypt_for_recipient(&pub_key, &plaintext) {
+        Ok(enc) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "kem_ciphertext": hex::encode(&enc.kem_ciphertext),
+                "encrypted_data": base64::engine::general_purpose::STANDARD.encode(&enc.encrypted_data),
+                "nonce": hex::encode(&enc.nonce),
+            })))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Encryption failed: {}", e)
+        }))),
+    }
+}
+
+async fn kem_decrypt(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+    let secret_key_hex = req.get("secret_key").and_then(|v| v.as_str()).unwrap_or("");
+    let kem_ciphertext_hex = req.get("kem_ciphertext").and_then(|v| v.as_str()).unwrap_or("");
+    let encrypted_data_b64 = req.get("encrypted_data").and_then(|v| v.as_str()).unwrap_or("");
+    let nonce_hex = req.get("nonce").and_then(|v| v.as_str()).unwrap_or("");
+    
+    let secret_key = match hex::decode(secret_key_hex) {
+        Ok(k) => k,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid hex secret key: {}", e)
+        }))),
+    };
+    
+    let kem_ciphertext = match hex::decode(kem_ciphertext_hex) {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid hex KEM ciphertext: {}", e)
+        }))),
+    };
+    
+    let encrypted_data = match base64::engine::general_purpose::STANDARD.decode(encrypted_data_b64) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid base64 encrypted data: {}", e)
+        }))),
+    };
+    
+    let nonce = match hex::decode(nonce_hex) {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid hex nonce: {}", e)
+        }))),
+    };
+    
+    let encrypted = EncryptedMessage {
+        kem_ciphertext,
+        encrypted_data,
+        nonce,
+    };
+    
+    match MlKem768::decrypt_for_recipient(&secret_key, &encrypted) {
+        Ok(plaintext) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "plaintext": base64::engine::general_purpose::STANDARD.encode(&plaintext),
+            })))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Decryption failed: {}", e)
+        }))),
+    }
 }
 
 // ============================================================================
@@ -392,14 +484,14 @@ async fn get_stats(state: axum::extract::State<AppState>) -> Json<StatsResponse>
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter("qsdid_api=info,tower_http=debug")
+        .with_env_filter("qsdid_api=info")
         .init();
     
     info!("🚀 QSDID Platform API Starting...");
-    info!("📦 Version: {}", env!("CARGO_PKG_VERSION"));
     
     let state = AppState {
         signatures: Arc::new(Mutex::new(HashMap::new())),
+        kem_keys: Arc::new(Mutex::new(HashMap::new())),
     };
     
     let cors = CorsLayer::new()
@@ -416,20 +508,16 @@ async fn main() {
         .route("/signatures/{id}", get(get_signature))
         .route("/signatures/{id}", delete(delete_signature))
         .route("/stats", get(get_stats))
+        .route("/kem/generate", post(kem_generate))
+        .route("/kem/encapsulate", post(kem_encapsulate))
+        .route("/kem/decapsulate", post(kem_decapsulate))
+        .route("/kem/encrypt", post(kem_encrypt))
+        .route("/kem/decrypt", post(kem_decrypt))
         .layer(cors)
         .with_state(state);
     
     let addr = "0.0.0.0:8080";
     info!("🌐 Listening on http://{}", addr);
-    info!("📝 Available endpoints:");
-    info!("   GET  /health                 - Health check");
-    info!("   POST /keys/generate?count=N  - Generate hybrid keys");
-    info!("   POST /sign                   - Sign a document (base64)");
-    info!("   POST /verify                 - Verify a signature");
-    info!("   GET  /signatures             - List all signatures");
-    info!("   GET  /signatures/{{id}}       - Get signature details");
-    info!("   DELETE /signatures/{{id}}     - Delete a signature");
-    info!("   GET  /stats                  - Get statistics");
     
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();

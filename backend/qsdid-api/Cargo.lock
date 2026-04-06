@@ -2814,7 +2814,6 @@ dependencies = [
  "identity_jose",
  "pqc_ml_dsa",
  "rand 0.8.5",
- "rand_core 0.10.0",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5914,6 +5913,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqc_ml_kem"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "chacha20poly1305",
+ "hex",
+ "oqs",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "prefix-hex"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6159,6 +6174,7 @@ dependencies = [
  "chrono",
  "hex",
  "hybrid_signer",
+ "pqc_ml_kem",
  "serde",
  "serde_json",
  "tokio",
