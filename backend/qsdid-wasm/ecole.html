@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>École - QSDID Platform</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a3a2a 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { text-align: center; margin-bottom: 10px; font-size: 2rem; background: linear-gradient(90deg, #88ffcc, #ffcc00); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .subtitle { text-align: center; color: #888; margin-bottom: 30px; }
+        .card { background: rgba(26, 58, 42, 0.9); border-radius: 16px; padding: 24px; border: 1px solid rgba(136, 255, 204, 0.2); margin-bottom: 20px; }
+        .card h2 { color: #88ffcc; margin-bottom: 20px; border-bottom: 1px solid rgba(136, 255, 204, 0.3); padding-bottom: 10px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; color: #aaa; font-size: 14px; }
+        input, textarea { width: 100%; padding: 12px; background: #0a0e27; border: 1px solid #88ffcc; border-radius: 8px; color: #fff; }
+        button {
+            background: linear-gradient(90deg, #88ffcc, #66ccaa);
+            color: #0a0e27;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.2s;
+        }
+        button:hover { transform: translateY(-2px); }
+        .key-display { font-family: monospace; font-size: 11px; background: #0a0e27; padding: 10px; border-radius: 8px; word-break: break-all; margin: 10px 0; border: 1px solid #88ffcc; }
+        .log-area { background: #0a0e27; border-radius: 8px; padding: 15px; height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; }
+        .log-entry { margin-bottom: 8px; padding: 5px; border-left: 3px solid; border-radius: 4px; }
+        .log-info { border-left-color: #88ffcc; color: #88ffcc; }
+        .log-success { border-left-color: #00ff00; color: #00ff00; }
+        .log-error { border-left-color: #ff4444; color: #ff4444; }
+        .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+        .status-success { background: #00ff00; color: #0a0e27; }
+        .status-pending { background: #ffcc00; color: #0a0e27; }
+        .flex-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .diploma-card { background: rgba(136, 255, 204, 0.1); border-radius: 8px; padding: 15px; margin: 10px 0; }
+        .small { padding: 6px 12px; font-size: 12px; }
+        .danger { background: linear-gradient(90deg, #ff4444, #cc0000); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏫 Université Post-Quantique</h1>
+        <div class="subtitle">Service des diplômes</div>
+
+        <div class="card">
+            <h2>🔌 État</h2>
+            <div class="flex-row">
+                <button id="checkHealthBtn">Vérifier API</button>
+                <span id="apiStatus" class="status-badge status-pending">Non connecté</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🔐 Clés de signature</h2>
+            <button id="genSignKeysBtn">📜 Générer clés de signature</button>
+            <div id="signKeysDisplay" class="key-display" style="display:none;"></div>
+        </div>
+
+        <div class="card">
+            <h2>📋 Demandes en attente</h2>
+            <div id="pendingRequestsContainer"></div>
+        </div>
+
+        <div class="card">
+            <h2>✍️ Signature et envoi</h2>
+            <div id="signAndSendPanel" style="display:none;">
+                <div class="form-group">
+                    <label>Étudiant</label>
+                    <input type="text" id="targetStudent" readonly>
+                </div>
+                <div class="form-group">
+                    <label>Diplôme</label>
+                    <input type="text" id="targetDegree" readonly>
+                </div>
+                <button id="signAndSendBtn">✍️ Signer et envoyer</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📜 Historique</h2>
+            <div id="signaturesList" class="log-area"></div>
+            <button id="refreshSigsBtn" class="small">⟳ Rafraîchir</button>
+        </div>
+
+        <div class="card">
+            <h2>📋 Journal</h2>
+            <div id="ecoleLog" class="log-area"></div>
+            <button id="clearLogBtn" class="danger small">Effacer</button>
+        </div>
+    </div>
+
+    <script type="module">
+        // Fonctions API directes vers le proxy
+        const API_BASE = '';
+
+        async function apiCall(endpoint, method = 'POST', body = null) {
+            const url = `/api${endpoint}`;
+            const options = {
+                method,
+                headers: { 'Content-Type': 'application/json' }
+            };
+            if (body) options.body = JSON.stringify(body);
+            const response = await fetch(url, options);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json();
+        }
+
+        async function generateHybridKeys() {
+            return apiCall('/keys/generate', 'POST');
+        }
+
+        async function signDocument(documentB64) {
+            return apiCall('/sign', 'POST', { document: documentB64 });
+        }
+
+        async function listSignatures() {
+            return apiCall('/signatures', 'GET');
+        }
+
+        async function kemEncrypt(publicKeyHex, plaintextB64) {
+            return apiCall('/kem/encrypt', 'POST', { public_key: publicKeyHex, plaintext: plaintextB64 });
+        }
+
+        async function healthCheck() {
+            return apiCall('/health', 'GET');
+        }
+
+        let mySignKeys = null;
+        let pendingRequests = [];
+        let currentStudentPubKey = null;
+
+        function toBase64(str) {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(str);
+            let binary = '';
+            for (let i = 0; i < data.length; i++) {
+                binary += String.fromCharCode(data[i]);
+            }
+            return btoa(binary);
+        }
+
+        function addLog(message, type = "info") {
+            const logArea = document.getElementById("ecoleLog");
+            const entry = document.createElement("div");
+            entry.className = `log-entry log-${type}`;
+            entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logArea.appendChild(entry);
+            entry.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+
+        async function checkHealth() {
+            try {
+                await healthCheck();
+                document.getElementById("apiStatus").className = "status-badge status-success";
+                document.getElementById("apiStatus").textContent = "✅ Connecté";
+                addLog("API connectée", "success");
+            } catch (e) {
+                document.getElementById("apiStatus").className = "status-badge status-error";
+                document.getElementById("apiStatus").textContent = "❌ Hors ligne";
+                addLog("API hors ligne", "error");
+            }
+        }
+
+        async function generateSignKeys() {
+            addLog("Génération clés de signature...", "info");
+            try {
+                const keys = await generateHybridKeys();
+                mySignKeys = keys;
+                const display = document.getElementById("signKeysDisplay");
+                display.style.display = "block";
+                display.innerHTML = `<strong>✅ Clés générées</strong><br>Key ID: ${keys.key_id}`;
+                addLog("✅ Clés de signature générées", "success");
+            } catch (e) {
+                addLog("❌ Erreur: " + e, "error");
+            }
+        }
+
+        function checkPendingRequests() {
+            const pendingJson = localStorage.getItem("pendingRequest");
+            if (pendingJson && !localStorage.getItem("processedRequest")) {
+                try {
+                    const request = JSON.parse(pendingJson);
+                    if (!pendingRequests.some(r => r.timestamp === request.timestamp)) {
+                        pendingRequests.push(request);
+                        addLog(`📨 Nouvelle demande de ${request.student}`, "success");
+                        updatePendingRequestsDisplay();
+                    }
+                } catch (e) {
+                    addLog("Erreur parsing demande: " + e, "error");
+                }
+            }
+        }
+
+        function updatePendingRequestsDisplay() {
+            const container = document.getElementById("pendingRequestsContainer");
+            if (pendingRequests.length === 0) {
+                container.innerHTML = '<div class="diploma-card">Aucune demande en attente</div>';
+                return;
+            }
+            container.innerHTML = pendingRequests.map((req, idx) => `
+                <div class="diploma-card">
+                    <strong>👩‍🎓 ${req.student}</strong><br>
+                    📜 ${req.degree}<br>
+                    <button class="small" onclick="window.selectRequest(${idx})">✍️ Traiter</button>
+                </div>
+            `).join("");
+            
+            window.selectRequest = (idx) => {
+                const req = pendingRequests[idx];
+                document.getElementById("targetStudent").value = req.student;
+                document.getElementById("targetDegree").value = req.degree;
+                currentStudentPubKey = req.publicKey;
+                document.getElementById("signAndSendPanel").style.display = "block";
+                addLog(`Demande sélectionnée: ${req.student}`, "info");
+                localStorage.setItem("activeRequest", JSON.stringify(req));
+            };
+        }
+
+        async function signAndSend() {
+            if (!mySignKeys) {
+                addLog("Générez d'abord les clés de signature", "error");
+                alert("Générez d'abord les clés de signature");
+                return;
+            }
+            
+            const activeRequest = JSON.parse(localStorage.getItem("activeRequest") || "{}");
+            if (!activeRequest.student) {
+                addLog("Aucune demande sélectionnée", "error");
+                alert("Sélectionnez d'abord une demande");
+                return;
+            }
+
+            const diploma = {
+                student: activeRequest.student,
+                degree: activeRequest.degree,
+                date: new Date().toISOString().split('T')[0],
+                issuer: "Universite Post-Quantique"
+            };
+            
+            const diplomaJson = JSON.stringify(diploma);
+            addLog(`📄 Diplôme: ${diplomaJson}`, "info");
+            
+            const diplomaB64 = toBase64(diplomaJson);
+            addLog(`✍️ Signature en cours...`, "info");
+            
+            try {
+                const signResult = await signDocument(diplomaB64);
+                addLog(`✅ Diplôme signé! ID: ${signResult.signature_id.substring(0, 16)}...`, "success");
+                
+                addLog("🔐 Chiffrement...", "info");
+                const encrypted = await kemEncrypt(currentStudentPubKey, diplomaB64);
+                addLog("✅ Diplôme chiffré", "success");
+                
+                localStorage.setItem("receivedDiploma", JSON.stringify({
+                    signatureId: signResult.signature_id,
+                    encryptedData: encrypted
+                }));
+                
+                addLog(`📨 Diplôme envoyé à ${activeRequest.student}!`, "success");
+                alert(`Diplôme envoyé à ${activeRequest.student}!`);
+                
+                pendingRequests = pendingRequests.filter(r => r.timestamp !== activeRequest.timestamp);
+                updatePendingRequestsDisplay();
+                document.getElementById("signAndSendPanel").style.display = "none";
+                localStorage.removeItem("activeRequest");
+                localStorage.setItem("processedRequest", Date.now().toString());
+                setTimeout(() => localStorage.removeItem("processedRequest"), 1000);
+            } catch (e) {
+                addLog(`❌ Erreur: ${e}`, "error");
+                console.error(e);
+            }
+        }
+
+        async function refreshSignatures() {
+            try {
+                const sigs = await listSignatures();
+                const container = document.getElementById("signaturesList");
+                if (sigs.count === 0) {
+                    container.innerHTML = '<div class="log-entry log-info">Aucune signature</div>';
+                } else {
+                    container.innerHTML = sigs.signatures.map(s => 
+                        `<div class="log-entry log-success">${s.signature_id.substring(0, 16)}...</div>`
+                    ).join("");
+                }
+            } catch (e) {
+                addLog("Erreur: " + e, "error");
+            }
+        }
+
+        async function main() {
+            await checkHealth();
+            
+            document.getElementById("checkHealthBtn").onclick = checkHealth;
+            document.getElementById("genSignKeysBtn").onclick = generateSignKeys;
+            document.getElementById("signAndSendBtn").onclick = signAndSend;
+            document.getElementById("refreshSigsBtn").onclick = refreshSignatures;
+            document.getElementById("clearLogBtn").onclick = () => {
+                document.getElementById("ecoleLog").innerHTML = "";
+                addLog("Journal effacé", "info");
+            };
+            
+            setInterval(checkPendingRequests, 2000);
+            setInterval(refreshSignatures, 5000);
+            addLog("Interface École prête", "success");
+        }
+
+        main();
+    </script>
+</body>
+</html>

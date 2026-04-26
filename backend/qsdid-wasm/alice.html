@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alice - QSDID Platform</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        h1 { text-align: center; margin-bottom: 10px; font-size: 2rem; background: linear-gradient(90deg, #00ffcc, #ffcc00); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .subtitle { text-align: center; color: #888; margin-bottom: 30px; }
+        .card { background: rgba(26, 31, 58, 0.9); border-radius: 16px; padding: 24px; border: 1px solid rgba(0, 255, 204, 0.2); margin-bottom: 20px; }
+        .card h2 { color: #00ffcc; margin-bottom: 20px; border-bottom: 1px solid rgba(0, 255, 204, 0.3); padding-bottom: 10px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; color: #aaa; font-size: 14px; }
+        input, textarea, select { width: 100%; padding: 12px; background: #0a0e27; border: 1px solid #00ffcc; border-radius: 8px; color: #fff; }
+        button {
+            background: linear-gradient(90deg, #ff88cc, #cc66aa);
+            color: #0a0e27;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.2s;
+        }
+        button:hover { transform: translateY(-2px); }
+        .key-display { font-family: monospace; font-size: 11px; background: #0a0e27; padding: 10px; border-radius: 8px; word-break: break-all; margin: 10px 0; border: 1px solid #00ffcc; }
+        .log-area { background: #0a0e27; border-radius: 8px; padding: 15px; height: 250px; overflow-y: auto; font-family: monospace; font-size: 12px; margin-top: 15px; }
+        .log-entry { margin-bottom: 8px; padding: 5px; border-left: 3px solid; border-radius: 4px; }
+        .log-info { border-left-color: #00ffcc; color: #00ffcc; }
+        .log-success { border-left-color: #00ff00; color: #00ff00; }
+        .log-error { border-left-color: #ff4444; color: #ff4444; }
+        .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+        .status-success { background: #00ff00; color: #0a0e27; }
+        .status-pending { background: #ffcc00; color: #0a0e27; }
+        .flex-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .diploma-card { background: rgba(0, 255, 204, 0.1); border-radius: 8px; padding: 15px; margin: 10px 0; }
+        .small { padding: 6px 12px; font-size: 12px; }
+        .danger { background: linear-gradient(90deg, #ff4444, #cc0000); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>👩‍🎓 Alice Martin</h1>
+        <div class="subtitle">Étudiante - Demandeuse de diplôme</div>
+
+        <div class="card">
+            <h2>🔌 État de la plateforme</h2>
+            <div class="flex-row">
+                <button id="checkHealthBtn">Vérifier connexion API</button>
+                <span id="apiStatus" class="status-badge status-pending">Non connecté</span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>🔐 Génération de mes clés KEM</h2>
+            <button id="genKemKeysBtn">🔑 Générer ma paire de clés KEM</button>
+            <div id="kemKeysDisplay" class="key-display" style="display:none;"></div>
+        </div>
+
+        <div class="card">
+            <h2>📜 Demande de diplôme</h2>
+            <div class="form-group">
+                <label>Nom complet</label>
+                <input type="text" id="studentName" value="Alice Martin">
+            </div>
+            <div class="form-group">
+                <label>Diplôme demandé</label>
+                <select id="degreeType">
+                    <option value="Master Post-Quantum Cryptography">Master Post-Quantum Cryptography</option>
+                    <option value="Bachelor Quantum Computing">Bachelor Quantum Computing</option>
+                </select>
+            </div>
+            <button id="requestDiplomaBtn">📨 Envoyer la demande</button>
+        </div>
+
+        <div class="card">
+            <h2>📦 Réception du diplôme</h2>
+            <div id="receivedDiplomaContainer" style="display:none;">
+                <div class="diploma-card">
+                    <div id="diplomaInfo"></div>
+                    <button id="decryptAndVerifyBtn">🔓 Déchiffrer et vérifier</button>
+                </div>
+            </div>
+            <div id="verificationResult" style="display:none;"></div>
+        </div>
+
+        <div class="card">
+            <h2>📋 Journal</h2>
+            <div id="aliceLog" class="log-area"></div>
+            <button id="clearLogBtn" class="danger small">Effacer</button>
+        </div>
+    </div>
+
+    <script type="module">
+        // API calls via proxy
+        async function apiCall(endpoint, method = 'POST', body = null) {
+            const url = `/api${endpoint}`;
+            const options = {
+                method,
+                headers: { 'Content-Type': 'application/json' }
+            };
+            if (body) options.body = JSON.stringify(body);
+            const response = await fetch(url, options);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json();
+        }
+
+        async function generateKemKeys() {
+            return apiCall('/kem/generate', 'POST');
+        }
+
+        async function kemDecrypt(secretKeyHex, kemCiphertextHex, encryptedDataB64, nonceHex) {
+            return apiCall('/kem/decrypt', 'POST', {
+                secret_key: secretKeyHex,
+                kem_ciphertext: kemCiphertextHex,
+                encrypted_data: encryptedDataB64,
+                nonce: nonceHex
+            });
+        }
+
+        async function verifySignature(signatureId, documentB64) {
+            return apiCall('/verify', 'POST', {
+                signature_id: signatureId,
+                document: documentB64
+            });
+        }
+
+        async function healthCheck() {
+            return apiCall('/health', 'GET');
+        }
+
+        let myKemPublicKey = null;
+        let myKemSecretKey = null;
+        let receivedSignatureId = null;
+        let receivedEncryptedData = null;
+
+        function addLog(message, type = "info") {
+            const logArea = document.getElementById("aliceLog");
+            const entry = document.createElement("div");
+            entry.className = `log-entry log-${type}`;
+            entry.innerHTML = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logArea.appendChild(entry);
+            entry.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+
+        async function checkHealth() {
+            try {
+                await healthCheck();
+                document.getElementById("apiStatus").className = "status-badge status-success";
+                document.getElementById("apiStatus").textContent = "✅ Connecté";
+                addLog("API connectée", "success");
+            } catch (e) {
+                document.getElementById("apiStatus").className = "status-badge status-error";
+                document.getElementById("apiStatus").textContent = "❌ Hors ligne";
+                addLog("API hors ligne: " + e, "error");
+            }
+        }
+
+        async function generateKemKeysHandler() {
+            addLog("Génération des clés KEM...", "info");
+            try {
+                const keys = await generateKemKeys();
+                myKemPublicKey = keys.public_key;
+                myKemSecretKey = keys.secret_key;
+                document.getElementById("kemKeysDisplay").style.display = "block";
+                document.getElementById("kemKeysDisplay").innerHTML = `<strong>✅ Clés KEM générées</strong><br>Clé publique: ${myKemPublicKey.substring(0, 64)}...`;
+                addLog("✅ Clés KEM générées", "success");
+            } catch (e) {
+                addLog("❌ Erreur: " + e, "error");
+            }
+        }
+
+        async function requestDiploma() {
+            if (!myKemPublicKey) {
+                addLog("Générez d'abord vos clés KEM", "error");
+                alert("Générez d'abord vos clés KEM");
+                return;
+            }
+            const requestData = {
+                student: document.getElementById("studentName").value,
+                degree: document.getElementById("degreeType").value,
+                timestamp: new Date().toISOString(),
+                publicKey: myKemPublicKey
+            };
+            localStorage.setItem("pendingRequest", JSON.stringify(requestData));
+            addLog("✅ Demande envoyée", "success");
+            alert("Demande envoyée! Ouvrez l'interface ÉCOLE.");
+        }
+
+        async function decryptAndVerify() {
+            if (!receivedSignatureId || !receivedEncryptedData) {
+                addLog("Aucun diplôme reçu", "error");
+                return;
+            }
+            if (!myKemSecretKey) {
+                addLog("Clés KEM non disponibles", "error");
+                return;
+            }
+            addLog("🔓 Déchiffrement du diplôme...", "info");
+            try {
+                const decrypted = await kemDecrypt(
+                    myKemSecretKey,
+                    receivedEncryptedData.kem_ciphertext,
+                    receivedEncryptedData.encrypted_data,
+                    receivedEncryptedData.nonce
+                );
+                const diplomaText = atob(decrypted.plaintext);
+                const diploma = JSON.parse(diplomaText);
+                addLog("✅ Diplôme déchiffré", "success");
+                
+                addLog("🔍 Vérification de la signature...", "info");
+                const verifyResult = await verifySignature(receivedSignatureId, decrypted.plaintext);
+                
+                const resultDiv = document.getElementById("verificationResult");
+                resultDiv.style.display = "block";
+                if (verifyResult.valid) {
+                    resultDiv.innerHTML = `<div class="diploma-card" style="border-color:#0f0;"><h3>✅ DIPLÔME AUTHENTIQUE!</h3><p>${diploma.degree}<br>${diploma.student}</p></div>`;
+                    addLog("✅ Signature VALIDE", "success");
+                } else {
+                    resultDiv.innerHTML = `<div class="diploma-card" style="border-color:#f00;"><h3>❌ DIPLÔME INVALIDE</h3></div>`;
+                    addLog("❌ Signature INVALIDE", "error");
+                }
+            } catch (e) {
+                addLog("❌ Erreur: " + e, "error");
+            }
+        }
+
+        function checkReceivedDiploma() {
+            const received = localStorage.getItem("receivedDiploma");
+            if (received) {
+                const data = JSON.parse(received);
+                receivedSignatureId = data.signatureId;
+                receivedEncryptedData = data.encryptedData;
+                document.getElementById("receivedDiplomaContainer").style.display = "block";
+                document.getElementById("diplomaInfo").innerHTML = `<strong>Diplôme reçu! ID: ${receivedSignatureId.substring(0, 32)}...</strong>`;
+                addLog("📦 Diplôme reçu", "success");
+                localStorage.removeItem("receivedDiploma");
+            }
+        }
+
+        async function main() {
+            await checkHealth();
+            
+            document.getElementById("checkHealthBtn").onclick = checkHealth;
+            document.getElementById("genKemKeysBtn").onclick = generateKemKeysHandler;
+            document.getElementById("requestDiplomaBtn").onclick = requestDiploma;
+            document.getElementById("decryptAndVerifyBtn").onclick = decryptAndVerify;
+            document.getElementById("clearLogBtn").onclick = () => {
+                document.getElementById("aliceLog").innerHTML = "";
+                addLog("Journal effacé", "info");
+            };
+            
+            setInterval(checkReceivedDiploma, 2000);
+            addLog("Interface Alice prête", "success");
+        }
+
+        main();
+    </script>
+</body>
+</html>

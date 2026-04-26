@@ -1,0 +1,18 @@
+{
+  "name": "qsdid-demo",
+  "version": "1.0.0",
+  "description": "QSDID Authentication System - Interactive Demo",
+  "type": "module",
+  "main": "demo-api-server.js",
+  "scripts": {
+    "demo": "node demo-api-server.js",
+    "demo:api": "node demo-api-server.js",
+    "open": "start http://localhost:3000",
+    "dev": "node demo-api-server.js & open http://localhost:3000"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {}
+}

@@ -1,0 +1,45 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # API Backend Rust
+  api:
+    build:
+      context: ./qsdid-api
+      dockerfile: Dockerfile
+    container_name: qsdid-api
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+    networks:
+      - qsdid-network
+
+  # Serveur pour Alice
+  alice:
+    image: nginx:alpine
+    container_name: qsdid-alice
+    ports:
+      - "8083:80"
+    volumes:
+      - ./qsdid-wasm:/usr/share/nginx/html:ro
+    restart: unless-stopped
+    networks:
+      - qsdid-network
+
+  # Serveur pour École
+  ecole:
+    image: nginx:alpine
+    container_name: qsdid-ecole
+    ports:
+      - "8083:80"
+    volumes:
+      - ./qsdid-wasm:/usr/share/nginx/html:ro
+    restart: unless-stopped
+    networks:
+      - qsdid-network
+
+networks:
+  qsdid-network:
+    driver: bridge

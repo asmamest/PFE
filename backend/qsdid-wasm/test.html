@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>QSDID - Démo WASM</title>
+    <style>
+        body { font-family: monospace; background: #0a0e27; color: #0ff; padding: 20px; }
+        button { background: #0ff; color: #000; border: none; padding: 10px 20px; margin: 5px; cursor: pointer; border-radius: 5px; }
+        button:hover { background: #0cc; }
+        pre { background: #111; padding: 10px; border-radius: 5px; overflow-x: auto; }
+        .success { color: #0f0; }
+        .error { color: #f00; }
+        .card { background: #1a1f3a; border-radius: 8px; padding: 20px; margin: 10px 0; }
+        h2 { color: #ffcc00; }
+    </style>
+</head>
+<body>
+<h1>🔐 QSDID Platform - Client WASM</h1>
+<p>Signatures hybrides (ML-DSA-65 + Ed25519) + KEM (ML-KEM-768)</p>
+
+<div class="card">
+    <h2>📋 Signatures</h2>
+    <button id="genSignKeys">Générer clés signature</button>
+    <button id="signDoc">Signer un document</button>
+    <button id="verifySig">Vérifier signature</button>
+</div>
+
+<div class="card">
+    <h2>🔒 KEM (Chiffrement)</h2>
+    <button id="genKemKeys">Générer clés KEM</button>
+    <button id="encryptMsg">Chiffrer un message</button>
+    <button id="decryptMsg">Déchiffrer le message</button>
+</div>
+
+<div class="card">
+    <h2>📊 Utilitaires</h2>
+    <button id="hashDoc">Hacher un document</button>
+    <button id="genId">Générer un ID</button>
+</div>
+
+<pre id="output">Cliquez sur un bouton pour démarrer...</pre>
+
+<script type="module">
+    import init, { 
+        generate_hybrid_keys, sign_document, verify_signature,
+        generate_kem_keys, kem_encrypt, kem_decrypt,
+        hash_document, generate_id
+    } from './pkg/qsdid_wasm.js';
+
+    await init();
+    const output = document.getElementById('output');
+
+    let lastSignatureId = null;
+    let lastKemKeys = null;
+    let lastEncrypted = null;
+
+    // Signatures
+    document.getElementById('genSignKeys').onclick = async () => {
+        output.innerText = "🔄 Génération des clés...";
+        const keys = await generate_hybrid_keys();
+        output.innerText = JSON.stringify(keys, null, 2);
+    };
+
+    document.getElementById('signDoc').onclick = async () => {
+        const doc = btoa(JSON.stringify({ student: "Alice", degree: "Master PQ", date: new Date().toISOString() }));
+        output.innerText = "🔄 Signature en cours...";
+        const sig = await sign_document(doc);
+        lastSignatureId = sig.signature_id;
+        output.innerText = JSON.stringify(sig, null, 2);
+    };
+
+    document.getElementById('verifySig').onclick = async () => {
+        if (!lastSignatureId) { output.innerText = "❌ Signez d'abord un document"; return; }
+        const doc = btoa(JSON.stringify({ student: "Alice", degree: "Master PQ", date: new Date().toISOString() }));
+        output.innerText = "🔄 Vérification en cours...";
+        const result = await verify_signature(lastSignatureId, doc);
+        output.innerText = JSON.stringify(result, null, 2);
+    };
+
+    // KEM
+    document.getElementById('genKemKeys').onclick = async () => {
+        output.innerText = "🔄 Génération des clés KEM...";
+        lastKemKeys = await generate_kem_keys();
+        output.innerText = JSON.stringify(lastKemKeys, null, 2);
+    };
+
+    document.getElementById('encryptMsg').onclick = async () => {
+        if (!lastKemKeys) { output.innerText = "❌ Générez d'abord des clés KEM"; return; }
+        const msg = "Diplôme top secret - Master Post-Quantum Cryptography";
+        output.innerText = "🔄 Chiffrement en cours...\nMessage original: " + msg;
+        lastEncrypted = await kem_encrypt(lastKemKeys.public_key, btoa(msg));
+        output.innerText += "\n\n✅ Message chiffré:\n" + JSON.stringify(lastEncrypted, null, 2);
+    };
+
+    document.getElementById('decryptMsg').onclick = async () => {
+        if (!lastKemKeys || !lastEncrypted) { output.innerText = "❌ Chiffrez d'abord un message"; return; }
+        output.innerText = "🔄 Déchiffrement en cours...";
+        const decrypted = await kem_decrypt(
+            lastKemKeys.secret_key,
+            lastEncrypted.kem_ciphertext,
+            lastEncrypted.encrypted_data,
+            lastEncrypted.nonce
+        );
+        const plain = atob(decrypted.plaintext);
+        output.innerText = "🔓 Message déchiffré:\n" + plain;
+    };
+
+    // Utilitaires
+    document.getElementById('hashDoc').onclick = async () => {
+        const doc = new TextEncoder().encode("Hello Post-Quantum World!");
+        const hash = hash_document(doc);
+        output.innerText = "📋 Hash BLAKE3:\n" + hash;
+    };
+
+    document.getElementById('genId').onclick = async () => {
+        const id = generate_id();
+        output.innerText = "🆔 ID généré:\n" + id;
+    };
+</script>
+</body>
+</html>

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>QSDID Platform - Post-Quantum Crypto Demo</title>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: monospace; padding: 20px; background: #0a0e27; color: #00ffcc; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .card { background: #1a1f3a; border-radius: 8px; padding: 20px; margin: 10px 0; }
+        button { background: #00ffcc; color: #0a0e27; border: none; padding: 10px 20px; margin: 5px; cursor: pointer; border-radius: 5px; }
+        button:hover { background: #00ccaa; }
+        pre { background: #0a0e27; padding: 10px; overflow-x: auto; border-radius: 5px; }
+        .success { color: #00ffcc; }
+        .error { color: #ff4444; }
+        input, textarea { width: 100%; padding: 10px; margin: 5px 0; background: #0a0e27; color: #00ffcc; border: 1px solid #00ffcc; border-radius: 5px; }
+        h2 { color: #ffcc00; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🔐 QSDID Platform - Post-Quantum Cryptography</h1>
+    <p>ML-DSA-65 (Signatures) + ML-KEM-768 (Key Exchange) | WebAssembly</p>
+
+    <div class="card">
+        <h2>📋 1. Signatures Hybrides (ML-DSA-65 + Ed25519)</h2>
+        <button id="genSignKeys">Générer clés de signature</button>
+        <button id="signDoc">Signer un document</button>
+        <button id="verifySig">Vérifier signature</button>
+        <div id="signOutput"></div>
+    </div>
+
+    <div class="card">
+        <h2>🔒 2. KEM (ML-KEM-768) - Chiffrement</h2>
+        <button id="genKemKeys">Générer clés KEM</button>
+        <button id="encryptMsg">Chiffrer un message</button>
+        <button id="decryptMsg">Déchiffrer le message</button>
+        <div id="kemOutput"></div>
+    </div>
+
+    <div class="card">
+        <h2>📊 3. Tests de performance</h2>
+        <button id="benchmark">Lancer les benchmarks</button>
+        <div id="benchOutput"></div>
+    </div>
+</div>
+
+<script type="module">
+    import init, { 
+        generate_hybrid_keys, sign_document, verify_signature,
+        generate_kem_keys, encrypt_message, decrypt_message,
+        hash_document
+    } from '../pkg/qsdid_wasm.js';
+
+    async function run() {
+        await init();
+        console.log("✅ WASM module loaded");
+
+        let currentKeys = null;
+        let currentSignature = null;
+        let currentKemKeys = null;
+        let currentEncrypted = null;
+
+        // Signatures
+        document.getElementById('genSignKeys').onclick = async () => {
+            currentKeys = await generate_hybrid_keys();
+            document.getElementById('signOutput').innerHTML = `
+                <pre>✅ Clés générées !
+Key ID: ${currentKeys.key_id}
+PQ Public Key: ${currentKeys.pq_public_key.substring(0, 64)}...
+Classical Public Key: ${currentKeys.classical_public_key.substring(0, 64)}...
+</pre>`;
+        };
+
+        document.getElementById('signDoc').onclick = async () => {
+            const doc = new TextEncoder().encode(JSON.stringify({
+                student: "Alice Martin",
+                degree: "Master Post-Quantum",
+                date: new Date().toISOString()
+            }));
+            currentSignature = await sign_document(doc);
+            document.getElementById('signOutput').innerHTML += `
+                <pre>✍️ Document signé !
+Signature ID: ${currentSignature.signature_id}
+Document hash: ${currentSignature.document_hash}
+Taille: ${currentSignature.signature_size} bytes</pre>`;
+        };
+
+        document.getElementById('verifySig').onclick = async () => {
+            if (!currentSignature || !currentKeys) {
+                document.getElementById('signOutput').innerHTML += `<pre class="error">❌ Générez d'abord des clés et signez un document</pre>`;
+                return;
+            }
+            const doc = new TextEncoder().encode(JSON.stringify({
+                student: "Alice Martin",
+                degree: "Master Post-Quantum",
+                date: new Date().toISOString()
+            }));
+            const isValid = await verify_signature(doc, currentSignature.signature_json, JSON.stringify(currentKeys.composite_jwk));
+            document.getElementById('signOutput').innerHTML += `<pre>🔍 Vérification: ${isValid ? '✅ SIGNATURE VALIDE' : '❌ SIGNATURE INVALIDE'}</pre>`;
+        };
+
+        // KEM
+        document.getElementById('genKemKeys').onclick = async () => {
+            currentKemKeys = await generate_kem_keys();
+            document.getElementById('kemOutput').innerHTML = `
+                <pre>🔐 Clés KEM générées !
+Public key: ${currentKemKeys.public_key.substring(0, 64)}...
+Secret key: ${currentKemKeys.secret_key.substring(0, 64)}...</pre>`;
+        };
+
+        document.getElementById('encryptMsg').onclick = async () => {
+            if (!currentKemKeys) {
+                document.getElementById('kemOutput').innerHTML += `<pre class="error">❌ Générez d'abord des clés KEM</pre>`;
+                return;
+            }
+            const msg = new TextEncoder().encode("Diplôme top secret - Master Post-Quantum Cryptography");
+            currentEncrypted = await encrypt_message(currentKemKeys.public_key, msg);
+            document.getElementById('kemOutput').innerHTML += `
+                <pre>🔒 Message chiffré !
+KEM ciphertext: ${currentEncrypted.kem_ciphertext.substring(0, 64)}...
+Encrypted data: ${currentEncrypted.encrypted_data.substring(0, 64)}...</pre>`;
+        };
+
+        document.getElementById('decryptMsg').onclick = async () => {
+            if (!currentKemKeys || !currentEncrypted) {
+                document.getElementById('kemOutput').innerHTML += `<pre class="error">❌ Générez des clés et chiffrez d'abord</pre>`;
+                return;
+            }
+            const decrypted = await decrypt_message(
+                currentKemKeys.secret_key,
+                currentEncrypted.kem_ciphertext,
+                currentEncrypted.encrypted_data,
+                currentEncrypted.nonce
+            );
+            const msg = new TextDecoder().decode(decrypted);
+            document.getElementById('kemOutput').innerHTML += `<pre>🔓 Message déchiffré: "${msg}"</pre>`;
+        };
+
+        // Benchmark
+        document.getElementById('benchmark').onclick = async () => {
+            const results = [];
+            const iterations = 10;
+            
+            // Test signatures
+            let start = performance.now();
+            for (let i = 0; i < iterations; i++) {
+                await generate_hybrid_keys();
+            }
+            results.push(`Génération clés signature: ${((performance.now() - start) / iterations).toFixed(2)} ms`);
+            
+            // Test KEM
+            start = performance.now();
+            for (let i = 0; i < iterations; i++) {
+                await generate_kem_keys();
+            }
+            results.push(`Génération clés KEM: ${((performance.now() - start) / iterations).toFixed(2)} ms`);
+            
+            document.getElementById('benchOutput').innerHTML = `<pre>📊 Benchmarks (${iterations} itérations):\n${results.join('\n')}</pre>`;
+        };
+    }
+
+    run();
+</script>
+</body>
+</html>
