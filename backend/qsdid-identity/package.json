@@ -1,0 +1,61 @@
+{
+  "name": "qsdid-identity-auth",
+  "version": "1.0.0",
+  "description": "Production-grade authentication system for QSDID Platform combining FIDO-like crypto, Local Proof of Presence, Web3 wallet binding, and decentralized identity",
+  "main": "src/index.js",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./state": "./src/state/stateMachine.js",
+    "./services": "./src/services/index.js",
+    "./flows": "./src/flows/index.js",
+    "./utils": "./src/utils/securityUtils.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "demo": "node ../main.js",
+    "demo:advanced": "node ../advancedDemo.js",
+    "demo:pqc": "node -e \"import('./src/services/postQuantumCryptoService.js').then(m => { console.log('✅ PQC Service loaded'); }).catch(e => console.error('❌', e.message))\"",
+    "demo:lpp": "node -e \"import('./src/services/localProofOfPresenceService.js').then(m => { console.log('✅ LPP Service loaded'); }).catch(e => console.error('❌', e.message))\"",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --testTimeout=30000",
+    "test:unit": "jest tests/unit --testTimeout=10000",
+    "test:integration": "jest tests/integration --testTimeout=30000",
+    "test:security": "jest tests/security --testTimeout=60000",
+    "lint": "eslint src --fix",
+    "health-check": "node -e \"import('./src/index.js').then(m => { const sys = new m.QSDIDAuthenticationSystem(); console.log('✅ System ready:', sys.getHealthStatus()); }).catch(e => { console.error('❌ Failed:', e.message); process.exit(1); })\""
+  },
+  "dependencies": {
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "eslint": "^8.50.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "authentication",
+    "FIDO2",
+    "cryptography",
+    "DID",
+    "decentralized-identity",
+    "Web3",
+    "wallet-binding",
+    "security",
+    "zero-trust",
+    "quantum-ready"
+  ],
+  "author": "QSDID Platform Team",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/qsdid-platform"
+  },
+  "homepage": "https://github.com/yourusername/qsdid-platform#readme",
+  "documentation": "docs/README.md",
+  "security": {
+    "contact": "security@qsdid-platform.com",
+    "reporting": "docs/SECURITY_MODEL.md"
+  }
+}

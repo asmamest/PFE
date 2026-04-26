@@ -1,0 +1,191 @@
+version: '3.9'
+
+# ─────────────────────────────────────────────────────────────
+# QSDID Decentralized Storage Stack
+#
+# Services:
+#   ipfs-node-1   – Kubo v0.39 primary node
+#   ipfs-node-2   – Kubo v0.39 replica (cluster peer)
+#   ipfs-node-3   – Kubo v0.39 replica (cluster peer)
+#   storage-manager – Node.js REST microservice
+#   redis         – CID queue + sweep state
+#   prometheus    – Metrics scraping
+#   grafana       – Dashboards
+# ─────────────────────────────────────────────────────────────
+
+x-ipfs-env: &ipfs-env
+  IPFS_STORAGE_MAX: 500GB
+  IPFS_ROUTING_TYPE: dht
+
+services:
+
+  # ───────────────────── IPFS Node 1 (primary) ─────────────────
+  ipfs-node-1:
+    image: ipfs/kubo:v0.39.0
+    container_name: qsdid-ipfs-1
+    restart: unless-stopped
+    environment:
+      <<: *ipfs-env
+      IPFS_PROFILE: server
+    volumes:
+      - ipfs1-data:/data/ipfs
+      - ./scripts/init-kubo.sh:/init-kubo.sh:ro
+    ports:
+      - "4001:4001/tcp"
+      - "4001:4001/udp"
+      - "5001:5001" # API
+      - "8080:8080" # Gateway (read-only)
+    networks:
+      - qsdid-net
+    healthcheck:
+      test: [ "CMD", "ipfs", "id" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ───────────────────── IPFS Node 2 (replica) ─────────────────
+  ipfs-node-2:
+    image: ipfs/kubo:v0.39.0
+    container_name: qsdid-ipfs-2
+    restart: unless-stopped
+    environment:
+      <<: *ipfs-env
+      IPFS_PROFILE: server
+    volumes:
+      - ipfs2-data:/data/ipfs
+    ports:
+      - "4002:4001/tcp"
+      - "4002:4001/udp"
+      - "5002:5001"
+    networks:
+      - qsdid-net
+    healthcheck:
+      test: [ "CMD", "ipfs", "id" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ───────────────────── IPFS Node 3 (replica) ─────────────────
+  ipfs-node-3:
+    image: ipfs/kubo:v0.39.0
+    container_name: qsdid-ipfs-3
+    restart: unless-stopped
+    environment:
+      <<: *ipfs-env
+      IPFS_PROFILE: server
+    volumes:
+      - ipfs3-data:/data/ipfs
+    ports:
+      - "4003:4001/tcp"
+      - "4003:4001/udp"
+      - "5003:5001"
+    networks:
+      - qsdid-net
+    healthcheck:
+      test: [ "CMD", "ipfs", "id" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ───────────────────── Storage Manager ───────────────────────
+  storage-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qsdid-storage-manager
+    restart: unless-stopped
+    depends_on:
+      ipfs-node-1:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3500
+      IPFS_API_URL: http://ipfs-node-1:5001
+      IPFS_GATEWAY_URL: http://ipfs-node-1:8080
+      REDIS_URL: redis://redis:6379
+      PROVIDE_SWEEP_INTERVAL_MINUTES: 10
+      PROVIDE_SWEEP_BATCH_SIZE: 1000
+      METRICS_ENABLED: "true"
+      PROMETHEUS_PORT: 9091
+      # Override with a real key in production via Docker secret or .env file
+      MASTER_ENCRYPTION_KEY: ${MASTER_ENCRYPTION_KEY}
+    ports:
+      - "3500:3500" # REST API
+      - "9091:9091" # Prometheus /metrics
+    networks:
+      - qsdid-net
+    volumes:
+      - manager-logs:/app/logs
+      - ./src:/app/src
+
+  # ───────────────────── Redis ──────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: qsdid-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6380:6379"
+    networks:
+      - qsdid-net
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ───────────────────── Prometheus ────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: qsdid-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    ports:
+      - "9092:9090"
+    networks:
+      - qsdid-net
+    depends_on:
+      - storage-manager
+
+  # ───────────────────── Grafana ────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: qsdid-grafana
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "3001:3000"
+    networks:
+      - qsdid-net
+    depends_on:
+      - prometheus
+
+# ─────────────────────────────────────────────────────────────
+networks:
+  qsdid-net:
+    driver: bridge
+
+volumes:
+  ipfs1-data:
+  ipfs2-data:
+  ipfs3-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+  manager-logs:

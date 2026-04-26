@@ -1,0 +1,321 @@
+/**
+ * Retrieve Credential - Post-Quantum Version  
+ * 
+ * CRITICAL DESIGN CHANGES (v2.0):
+ * ✅ MANDATORY SIGNATURE VERIFICATION - Every retrieved credential checked
+ * ✅ ZERO DECRYPTION - No decryption needed (claims are plain)
+ * ✅ TAMPER DETECTION - Modified credentials are rejected
+ * ✅ ZKP-READY - Verification proofs exportable for blockchain
+ * 
+ * Security Flow:
+ * 1. Fetch credential files from IPFS
+ * 2. Load signature metadata + claims
+ * 3. VERIFY ML-DSA-65 signature (MANDATORY)
+ * 4. If invalid → REJECT (throw error)
+ * 5. If valid → return plain claims
+ */
+
+import { getIpfsClient } from '../ipfs/client.js';
+import { logger } from '../utils/logger.js';
+import { metrics } from '../metrics/prometheus.js';
+import { PQVerifier } from '../pqc/verifier.js';
+import { PQKeyManager } from '../pqc/keyManager.js';
+
+/**
+ * Helper: Collect stream to bytes
+ */
+async function collectBytes(asyncIter) {
+  const chunks = [];
+  for await (const chunk of asyncIter) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+/**
+ * Retrieve a credential from IPFS with MANDATORY PQ signature verification
+ * 
+ * @param {string} rootCid - The root CID of the credential directory
+ * @param {Object} options - Options
+ * @param {string} options.issuerPublicKey - Optional: issuer's ML-DSA public key
+ * @param {boolean} options.includeProof - Include verification proof in response
+ * @param {boolean} options.includeRaw - Include raw signature in response
+ * @param {string} options.mode - 'verify_only' | 'full' (default)
+ * @returns {Promise<Object>} { claims, metadata, verification, ... }
+ */
+export async function retrieveCredential(rootCid, options = {}) {
+  const {
+    issuerPublicKey = null,
+    includeProof = process.env.INCLUDE_VERIFICATION_PROOF !== 'false',
+    includeRaw = false,
+    mode = 'full',
+  } = options;
+
+  const startTime = Date.now();
+
+  logger.info(`🔍 [retrieve] Fetching credential from IPFS: ${rootCid}`);
+
+  if (!rootCid || typeof rootCid !== 'string') {
+    throw new Error('❌ Invalid CID: must be a non-empty string');
+  }
+
+  try {
+    const ipfs = await getIpfsClient();
+    const verifier = new PQVerifier();
+    const keyManager = new PQKeyManager();
+
+    // Step 1: Scan IPFS directory and collect all files
+    logger.debug(`[retrieve] Scanning IPFS directory...`);
+    const fileMap = {};
+
+    async function scanDirectory(targetCid) {
+      try {
+        for await (const entry of ipfs.ls(targetCid)) {
+          try {
+            if (entry.type === 'file') {
+              const data = await collectBytes(ipfs.cat(entry.cid));
+              fileMap[entry.name] = data;
+              logger.debug(`[retrieve] Loaded file: ${entry.name} (${data.length} bytes)`);
+            } else if (entry.type === 'dir') {
+              // Recursively scan subdirectories
+              await scanDirectory(entry.cid);
+            }
+          } catch (err) {
+            logger.warn(`[retrieve] Error reading entry ${entry.name}: ${err.message}`);
+            if (err.message.includes('directory')) {
+              await scanDirectory(entry.cid);
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(`[retrieve] Error scanning directory ${targetCid}: ${err.message}`);
+      }
+    }
+
+    await scanDirectory(rootCid);
+
+    logger.debug(`[retrieve] Files found: ${Object.keys(fileMap).join(', ')}`);
+
+    // Step 2: Load essential files (claims, metadata, signature)
+    if (!fileMap['claims.json']) {
+      throw new Error('❌ Missing claims.json - credential incomplete');
+    }
+    if (!fileMap['metadata.json']) {
+      throw new Error('❌ Missing metadata.json - credential incomplete');
+    }
+    if (!fileMap['signature.json']) {
+      throw new Error('❌ Missing signature.json - NO SIGNATURE FOUND, CREDENTIAL REJECTED');
+    }
+
+    const claims = JSON.parse(fileMap['claims.json'].toString('utf8'));
+    const metadata = JSON.parse(fileMap['metadata.json'].toString('utf8'));
+    const signatureData = JSON.parse(fileMap['signature.json'].toString('utf8'));
+    const image = fileMap['image.bin'] || null;
+
+    logger.debug(`[retrieve] Loaded claims, metadata, and signature`);
+
+    // Step 3: Construct credential object for verification
+    const credential = {
+      claims: claims,
+      metadata: metadata,
+      signature: signatureData,
+    };
+
+    // Step 4: MANDATORY SIGNATURE VERIFICATION
+    logger.info(`🔐 [retrieve] VERIFYING ML-DSA-65 SIGNATURE (MANDATORY)...`);
+
+    const verificationResult = await verifier.verify(credential, {
+      throwOnFailure: process.env.STRICT_VERIFICATION !== 'false', // Strict by default
+      includeReport: includeProof,
+      issuerPublicKey: issuerPublicKey,
+    });
+
+    // Step 5: Check verification result - REJECT if invalid
+    if (!verificationResult.valid) {
+      logger.error(`❌ [retrieve] SIGNATURE VERIFICATION FAILED - CREDENTIAL REJECTED`);
+      logger.error(`[retrieve] Reason: ${verificationResult.error}`);
+      logger.error(`[retrieve] Status: ${verificationResult.status}`);
+
+      metrics.retrieveErrors.inc();
+      metrics.verificationFailures?.inc?.();
+
+      throw new Error(
+        `❌ Credential signature verification failed: ${verificationResult.error}. ` +
+        `Status: ${verificationResult.status}`
+      );
+    }
+
+    logger.info(`✅ [retrieve] SIGNATURE VERIFIED - Credential is authentic`);
+
+    // Step 6: SIGNATURE VALID - Return credential in plain
+    const duration = Date.now() - startTime;
+    metrics.retrieveTotal?.inc?.();
+    metrics.retrieveDurationSeconds?.observe?.(duration / 1000);
+    metrics.verificationSuccess?.inc?.();
+
+    // Build response based on mode
+    const response = {
+      success: true,
+      cid: rootCid,
+
+      // Plain claims (NOT encrypted)
+      claims: claims,
+
+      // Metadata
+      metadata: metadata,
+
+      // Verification status
+      verified: true,
+      verification: {
+        status: verificationResult.status,
+        algorithm: 'ML-DSA-65',
+        verified_at: verificationResult.verified_at,
+        issuer_did: signatureData.issuer_did,
+        duration_ms: verificationResult.duration_ms,
+      },
+
+      // Optional image
+      image: image ? { available: true, size_bytes: image.length } : { available: false },
+
+      // Retrieval timing
+      retrieval_time_ms: duration,
+      note: '✅ Credential verified with ML-DSA-65 - Safe to use',
+    };
+
+    // Optional: Include verification proof for ZKP
+    if (includeProof && verificationResult.report) {
+      response.verification_report = verificationResult.report;
+    }
+
+    // Optional: ZKP proof export
+    if (process.env.ZKP_FORMAT_EXPORT !== 'false') {
+      try {
+        response.zkp_proof = verifier.exportZKPProof(credential, verificationResult);
+      } catch (err) {
+        logger.debug(`[retrieve] ZKP proof export skipped: ${err.message}`);
+      }
+    }
+
+    // Optional: Include raw signature (for debugging only)
+    if (includeRaw) {
+      response.signature_raw = signatureData.ml_dsa;
+    }
+
+    logger.info(`✅ [retrieve] Credential retrieved and verified in ${duration}ms`, {
+      cid: rootCid,
+      issuer_did: signatureData.issuer_did,
+    });
+
+    // Cleanup
+    await verifier.close();
+    await keyManager.close();
+
+    return response;
+  } catch (error) {
+    logger.error(`❌ [retrieve] Error retrieving credential:`, error);
+    metrics.retrieveErrors?.inc?.();
+    throw error;
+  }
+}
+
+/**
+ * Verify credential signature only (without returning claims)
+ * Useful for audit or proof generation
+ * 
+ * @param {string} rootCid - The root CID of the credential
+ * @returns {Promise<Object>} { valid, issuer_did, verified_at, ... }
+ */
+export async function verifyCredential(rootCid, options = {}) {
+  logger.info(`🔐 [verify] Verifying credential: ${rootCid}`);
+
+  try {
+    const result = await retrieveCredential(rootCid, {
+      ...options,
+      includeProof: true,
+    });
+
+    // Return only verification metadata (no claims)
+    return {
+      valid: result.verified,
+      cid: result.cid,
+      verification: result.verification,
+      verification_report: result.verification_report,
+      zkp_proof: result.zkp_proof,
+    };
+  } catch (error) {
+    logger.error(`❌ [verify] Verification failed:`, error);
+    return {
+      valid: false,
+      error: error.message,
+      cid: rootCid,
+    };
+  }
+}
+
+/**
+ * Retrieve credential for ZKP blockchain integration
+ * Returns credential in format suitable for Zero Knowledge Proofs
+ * 
+ * @param {string} rootCid - The root CID
+ * @returns {Promise<Object>} ZKP-formatted response
+ */
+export async function retrieveCredentialForZKP(rootCid) {
+  logger.info(`📜 [retrieve-zkp] Retrieving credential for ZKP: ${rootCid}`);
+
+  const result = await retrieveCredential(rootCid, {
+    includeProof: true,
+  });
+
+  return {
+    credential: {
+      claims: result.claims,
+      metadata: result.metadata,
+    },
+    proof: result.zkp_proof || result.verification,
+    cid: rootCid,
+    zkp_ready: true,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/**
+ * Batch retrieve multiple credentials
+ * 
+ * @param {string[]} cids - Array of CIDs to retrieve
+ * @returns {Promise<Object>} { total, retrieved, failed, results }
+ */
+export async function retrieveCredentialsBatch(cids) {
+  if (!Array.isArray(cids)) {
+    throw new Error('CIDs must be an array');
+  }
+
+  logger.info(`📦 [retrieve-batch] Retrieving ${cids.length} credentials...`);
+
+  const results = [];
+  let retrieved = 0;
+  let failed = 0;
+
+  for (const cid of cids) {
+    try {
+      const result = await retrieveCredential(cid, {
+        includeProof: false, // Skip proofs in batch for performance
+      });
+      results.push({ cid, success: true, credential: result });
+      retrieved++;
+    } catch (error) {
+      results.push({ cid, success: false, error: error.message });
+      failed++;
+    }
+  }
+
+  logger.info(`✅ Batch retrieval complete: ${retrieved} succeeded, ${failed} failed`);
+
+  return {
+    total: cids.length,
+    retrieved,
+    failed,
+    results,
+  };
+}
+
+export default retrieveCredential;

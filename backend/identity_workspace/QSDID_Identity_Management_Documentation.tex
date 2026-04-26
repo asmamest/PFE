@@ -1,0 +1,1156 @@
+\documentclass[12pt,a4paper]{report}
+\usepackage[utf-8]{inputenc}
+\usepackage[french]{babel}
+\usepackage[margin=2cm]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{amssymb}
+\usepackage{tikz}
+\usepackage{float}
+
+% Configuration Listings pour Rust
+\lstset{
+  language=Rust,
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{gray},
+  stringstyle=\color{red},
+  showstringspaces=false,
+  tabsize=2,
+  frame=single,
+  backgroundcolor=\color{lightgray!20},
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1
+}
+
+\title{\textbf{QSDID Platform}\\
+  \Large Gestion d'Identité et Encapsulation des Clés\\
+  \normalsize Plateforme d'Identité Quantique Sécurisée Décentralisée}
+\author{Architecture Cryptographique Post-Quantique}
+\date{\today}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{QSDID Platform}
+\lhead{Documentation Technique}
+\cfoot{\thepage}
+
+\begin{document}
+
+\maketitle
+
+\tableofcontents
+\newpage
+
+% ============================================================================
+\chapter{Vue d'Ensemble et Architecture}
+% ============================================================================
+
+\section{Vue d'Ensemble du Projet}
+
+Le projet QSDID est une \textbf{Plateforme d'Identité Quantique Sécurisée Décentralisée} construite en \textbf{Rust}, inspirée par l'architecture IOTA Identity, mais fortifiée par la \textbf{cryptographie post-quantique (PQC)} et les signatures \textbf{hybrides} pour la résistance quantique.
+
+\subsection{Caractéristiques Principales}
+
+\begin{itemize}
+  \item \textbf{13 crates Rust} spécialisées dans la gestion cryptographique
+  \item Support de \textbf{ML-DSA-65} (signatures post-quantiques) + \textbf{Ed25519} (signatures classiques)
+  \item Intégration \textbf{JOSE/JWK} complète pour la sérialisation
+  \item Stockage distribué via \textbf{IPFS/BlockFrost}
+  \item Conformité aux standards NIST FIPS 204 et 203
+\end{itemize}
+
+\subsection{Architecture Modulaire}
+
+Le projet est organisé en 13 modules complémentaires :
+
+\begin{enumerate}
+  \item \texttt{identity\_core} : Types fondamentaux et utilitaires
+  \item \texttt{identity\_did} : Implémentation des DIDs (Decentralized Identifiers)
+  \item \texttt{identity\_credential} : Gestion des credentials
+  \item \texttt{identity\_document} : Documents d'identité
+  \item \texttt{identity\_jose} : Implémentation JOSE (JWK, JWS, JWT)
+  \item \texttt{identity\_verification} : Vérification de signatures
+  \item \texttt{identity\_pqc\_verifier} : Vérification post-quantique
+  \item \texttt{pqc\_ml\_dsa} : Signatures ML-DSA-65 (FIPS 204)
+  \item \texttt{pqc\_ml\_kem} : Encapsulation ML-KEM-768 (FIPS 203)
+  \item \texttt{hybrid\_signer} : Signatures hybrides avec WNS
+  \item \texttt{identity\_storage} : Stockage distribué et gestion blockchain
+  \item \texttt{storage\_client} : Client de stockage
+  \item \texttt{test\_pqc} : Tests de cryptographie post-quantique
+\end{enumerate}
+
+% ============================================================================
+\chapter{Couche Gestion d'Identités}
+% ============================================================================
+
+\section{Architecture DID (Decentralized Identifier)}
+
+\subsection{Concept Fondamental}
+
+Un \textbf{DID} (Decentralized Identifier) est un identificateur unique, autogéré et vérifiable conforme aux standards W3C. Contrairement aux systèmes centralisés, les DIDs ne dépendent d'aucune autorité centrale.
+
+\subsection{Structure DID}
+
+\begin{lstlisting}
+Format: did:method:network:identifier
+
+Exemple: did:iota:main:axFkJEKz5a4
+         |  |    |    |
+         |  |    |    +-- Method-specific ID
+         |  |    +------- Network (optional)
+         |  +------------ Method name  
+         +-------------- Scheme (always "did")
+\end{lstlisting}
+
+\subsection{Trait DID}
+
+Le trait \texttt{DID} définit l'interface universelle pour tous les types d'identifiants :
+
+\begin{lstlisting}[language=Rust]
+pub trait DID: Clone + PartialEq + Eq + PartialOrd + Ord + Hash {
+  const SCHEME: &'static str = "did";
+  
+  fn scheme(&self) -> &'static str;      // "did"
+  fn method(&self) -> &str;               // "iota", "example"
+  fn method_id(&self) -> &str;           // Identifiant unique
+  fn authority(&self) -> &str;           // method:method_id
+  fn as_str(&self) -> &str;              // Représentation sérialisée
+  fn to_url(&self) -> DIDUrl;
+}
+\end{lstlisting}
+
+\subsection{CoreDID}
+
+La structure \texttt{CoreDID} implémente le trait \texttt{DID} :
+
+\begin{itemize}
+  \item \textbf{Parse et validation} stricte selon W3C standards
+  \item \textbf{Méthodes setter} pour modification sécurisée
+  \item \textbf{Validation} des caractères de method-name et method-id
+  \item \textbf{Sérialisation} JSON complète
+\end{itemize}
+
+Exemple de validation :
+\begin{lstlisting}[language=Rust]
+let did = CoreDID::parse("did:iota:main:axFkJEKz5a4")?;
+
+assert_eq!(did.scheme(), "did");
+assert_eq!(did.method(), "iota");
+assert_eq!(did.method_id(), "main:axFkJEKz5a4");
+\end{lstlisting}
+
+\section{DIDs Étendus}
+
+\subsection{DID-JWK}
+
+Encode directement une clé publique JWK dans l'identifiant :
+\begin{lstlisting}
+did:jwk:eyJjcnYiOiJFZDI1NTE5IiwieCI6IlZ...
+\end{lstlisting}
+
+Avantages :
+\begin{itemize}
+  \item Autonome (pas de blockchain)
+  \item Vérification directe de la clé
+  \item Résilience maximale
+\end{itemize}
+
+\subsection{DID-CompositeJWK}
+
+Combine clés post-quantiques + classiques dans l'identifiant.
+
+\section{Système de Credentials}
+
+\subsection{Structure CredentialData}
+
+\begin{lstlisting}[language=Rust]
+#[derive(Serialize, Deserialize, Clone)]
+pub struct CredentialData {
+    pub claims: serde_json::Value,
+    pub metadata: Metadata,
+    pub ai_result: AiResult,
+    pub image: Option<Vec<u8>>,
+}
+
+pub struct Metadata {
+    pub credential_type: String,
+    pub issuer_did: String,
+    pub holder_did: String,
+    pub uuid: String,
+    pub issued_at: String,
+    pub expires_at: Option<String>,
+}
+
+pub struct AiResult {
+    pub fraud_score: f64,           // 0.0 to 1.0
+    pub heatmap_hash: String,
+    pub analysis_timestamp: String,
+}
+\end{lstlisting}
+
+\subsection{Cycle de Vie du Credential}
+
+\begin{enumerate}
+  \item \textbf{Génération} : Émetteur crée le credential signé
+  \item \textbf{Signature} : Composite signature (ML-DSA-65 + Ed25519)
+  \item \textbf{Stockage} : Sauvegarde sur blockchain/IPFS via StorageClient
+  \item \textbf{Distribution} : Holder reçoit rootCid
+  \item \textbf{Vérification} : Holder récupère et valide la signature
+  \item \textbf{Révocation} : Émetteur peut révoquer via credential registry
+\end{enumerate}
+
+% ============================================================================
+\chapter{Couche Encapsulation des Clés}
+% ============================================================================
+
+\section{Architecture JOSE}
+
+\textbf{JOSE} (JSON Object Signing and Encryption) est un framework standardisé pour :
+\begin{itemize}
+  \item Signature de données JSON (\textbf{JWS})
+  \item Chiffrement de données JSON (\textbf{JWE})
+  \item Tokens web (\textbf{JWT})
+  \item Représentation de clés (\textbf{JWK})
+\end{itemize}
+
+\subsection{Structure des Modules}
+
+\begin{lstlisting}
+identity_jose/src/
+├── jwk/                    # JSON Web Keys
+│   ├── key.rs             # Clé générale
+│   ├── key_hybrid.rs      # Clés hybrides
+│   ├── composite_jwk.rs   # Clés composites PQC
+│   ├── key_type.rs        # Types: EC, RSA, OKP, Akp
+│   └── key_params.rs      # Paramètres
+├── jws/                    # JSON Web Signature
+│   ├── algorithm.rs       # Algorithmes JWS
+│   └── encoding/          # Encodage/Décodage
+├── jwt/                    # JSON Web Token
+│   ├── claims.rs
+│   └── header.rs
+└── jose/traits.rs         # Traits JOSE
+\end{lstlisting}
+
+\section{JWK (JSON Web Key)}
+
+\subsection{Types de Clés Supportées}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|c|c|c|c|}
+\hline
+\textbf{Type} & \textbf{Notation} & \textbf{Usage} & \textbf{Taille} \\
+\hline
+RSA & \texttt{kty: "RSA"} & Chiffrement classique & 2048-4096 bits \\
+\hline
+EC (P-256/P-384) & \texttt{kty: "EC"} & ECDSA signatures & 256-384 bits \\
+\hline
+OKP (Ed25519) & \texttt{kty: "OKP"} & EdDSA signatures & 256 bits \\
+\hline
+AKP & \texttt{kty: "Akp"} & \textbf{Post-Quantum (ML-DSA-65)} & 1952 bytes \\
+\hline
+\end{tabular}
+\caption{Types de clés JWK supportées}
+\end{table}
+
+\section{TraditionalJwk (Clés Classiques)}
+
+\subsection{Structure}
+
+\begin{lstlisting}[language=Rust]
+pub struct TraditionalJwk {
+    pub kty: JwkType,           // "RSA", "EC", "OKP"
+    pub use_: Option<JwkUse>,  // "sig" ou "enc"
+    pub key_ops: Vec<JwkOperation>,  // "sign", "verify", etc.
+    pub alg: Option<String>,    // "ES256", "EdDSA", "RS256"
+    pub kid: Option<String>,    // Key ID (thumbprint)
+    pub x5u: Option<Url>,       // X.509 certificate URL
+    pub x5c: Vec<String>,       // Certificate chain
+    pub params: JwkParams,      // Paramètres spécifiques
+}
+\end{lstlisting}
+
+\subsection{Paramètres OKP (Ed25519)}
+
+\begin{lstlisting}[language=json]
+{
+  "kty": "OKP",
+  "crv": "Ed25519",
+  "x": "<base64url of public key>",
+  "d": "<base64url of secret key>"
+}
+\end{lstlisting}
+
+\begin{itemize}
+  \item \textbf{x} : Clé publique (base64url)
+  \item \textbf{d} : Clé privée (base64url, seulement si clé privée)
+  \item \textbf{crv} : Courbe (Ed25519)
+\end{itemize}
+
+\section{PostQuantumJwk (Clés Post-Quantiques)}
+
+\subsection{Structure}
+
+\begin{lstlisting}[language=Rust]
+pub struct PostQuantumJwk(Jwk) {
+    pub kty: JwkType::Akp,      // Always "Akp"
+    pub crv: "ML-DSA-65",       // Post-quantum curve
+    pub x: Vec<u8>,             // Public key (1952 bytes)
+    pub d: Option<Vec<u8>>,     // Secret key (2560 bytes)
+    pub kid: String,            // Key identifier
+}
+\end{lstlisting}
+
+\subsection{Restrictions et Validations}
+
+\begin{itemize}
+  \item \textbf{jty obligatoirement "Akp"} : Ne peut contenir que des clés post-quantiques
+  \item \textbf{Algorithmes valides} : `id-MLDSA44-Ed25519` ou `id-MLDSA65-Ed25519`
+  \item \textbf{Validation stricte} : Rejet de tout autre algorithme classique
+  \item \textbf{Taillage} : Public key 1952 bytes, Secret key 2560 bytes
+\end{itemize}
+
+\section{CompositeJwk (Clés Hybrides)}
+
+\subsection{Architecture Composite}
+
+\begin{lstlisting}[language=Rust]
+pub struct CompositeJwk {
+    pub alg_id: CompositeAlgId,
+    pub traditional_public_key: TraditionalJwk,
+    pub pq_public_key: PostQuantumJwk,
+}
+
+pub enum CompositeAlgId {
+    IdMldsa44Ed25519,  // DER: 060B6086480186FA6B5008013E
+    IdMldsa65Ed25519,  // DER: 060B6086480186FA6B50080147
+}
+\end{lstlisting}
+
+\subsection{Sérialisation JWK Composite}
+
+\begin{lstlisting}[language=json]
+{
+  "algId": "id-MLDSA65-Ed25519",
+  "traditionalPublicKey": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "x": "..."
+  },
+  "pqPublicKey": {
+    "kty": "Akp",
+    "crv": "ML-DSA-65",
+    "x": "..."
+  }
+}
+\end{lstlisting}
+
+\subsection{Avantages de l'Architecture Composite}
+
+\begin{enumerate}
+  \item \textbf{Résistance Quantique} : ML-DSA-65 garantit sécurité post-quantique
+  \item \textbf{Compatibilité} : Ed25519 assure compatibilité avec systèmes existants
+  \item \textbf{Flexibilité} : Permet migration progressive vers PQC
+  \item \textbf{Sécurité Améliorée} : Double validation augmente confiance
+\end{enumerate}
+
+% ============================================================================
+\chapter{Cryptographie Post-Quantique}
+% ============================================================================
+
+\section{ML-DSA-65 (Module-Lattice Digital Signature)}
+
+\subsection{Conformité et Standardisation}
+
+\begin{itemize}
+  \item \textbf{Norme} : NIST FIPS 204 (Approuvé pour usage gouvernemental)
+  \item \textbf{Base} : Dilithium standardisé par NIST
+  \item \textbf{Implémentation} : Open Quantum Safe (liboqs-rust)
+  \item \textbf{Date d'approbation} : August 2024
+\end{itemize}
+
+\subsection{Spécifications Techniques}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|r|r|}
+\hline
+\textbf{Paramètre} & \textbf{ML-DSA-44} & \textbf{ML-DSA-65} \\
+\hline
+Public Key Size & 1232 bytes & 1952 bytes \\
+\hline
+Secret Key Size & 2400 bytes & 2560 bytes \\
+\hline
+Signature Size & 2420 bytes & 3309 bytes \\
+\hline
+Security Level & Level 2 (128-bit) & Level 3 (192-bit) \\
+\hline
+Performance & $\sim$2-3 ms & $\sim$3-5 ms \\
+\hline
+\end{tabular}
+\caption{Spécifications ML-DSA}
+\end{table}
+
+\subsection{Génération et Utilisation}
+
+\begin{lstlisting}[language=Rust]
+use pqc_ml_dsa::PqcSigner;
+
+// Générer nouvelle paire de clés
+let signer = PqcSigner::generate()?;
+
+// Signer un message
+let message = b"Document to sign";
+let signature = signer.sign(message)?;
+
+// Vérifier une signature
+let is_valid = signer.verify(message, &signature)?;
+
+// Récupérer depuis clés stockées
+let signer = PqcSigner::from_secret_key(
+    secret_key_bytes,
+    public_key_bytes
+)?;
+\end{lstlisting}
+
+\subsection{Résistance Quantique}
+
+ML-DSA-65 résiste aux attaques quantiques via :
+\begin{itemize}
+  \item \textbf{Problème Lattice} : Très difficile même pour ordinateurs quantiques
+  \item \textbf{Espace de clé énorme} : $2^{256}$ combinaisons possibles
+  \item \textbf{Pas d'algorithme connu} : Pas d'équivalent quantique efficace du GNFS
+\end{itemize}
+
+\section{ML-KEM-768 (Key Encapsulation Mechanism)}
+
+\subsection{Conformité et Standardisation}
+
+\begin{itemize}
+  \item \textbf{Norme} : NIST FIPS 203 (Kyber standardisé)
+  \item \textbf{Base} : Kyber post-quantum KEM
+  \item \textbf{Implémentation} : liboqs-rust
+  \item \textbf{Type} : Key Encapsulation Mechanism (pas signature)
+\end{itemize}
+
+\subsection{Spécifications Techniques}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|r|}
+\hline
+\textbf{Paramètre} & \textbf{Valeur} \\
+\hline
+Public Key Size & 1184 bytes \\
+\hline
+Secret Key Size & 2400 bytes \\
+\hline
+Ciphertext Size & 1088 bytes \\
+\hline
+Shared Secret Size & 32 bytes \\
+\hline
+Security Level & 192-bit (Level 3) \\
+\hline
+\end{tabular}
+\caption{Spécifications ML-KEM-768}
+\end{table}
+
+\subsection{ML-KEM + AES-256-GCM (AEAD)}
+
+Le mécanisme d'encapsulation ML-KEM-768 est combiné avec le chiffrement AES-256-GCM :
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|l|}
+\hline
+\textbf{ML-KEM-768} & \textbf{Génère shared secret 32 bytes} \\
+\hline
+\textbf{AES-256-GCM} & \textbf{Chiffre message avec authentification} \\
+\hline
+\textbf{Nonce/IV} & \textbf{12 bytes aléatoires via OsRng} \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Encapsulation dans les Credentials}
+
+\begin{lstlisting}[language=Rust]
+pub struct EncryptedMessage {
+    pub kem_ciphertext: Vec<u8>,     // 1088 bytes (ML-KEM)
+    pub encrypted_data: Vec<u8>,     // AES-GCM ciphertext
+    pub nonce: Vec<u8>,              // 12 bytes
+}
+
+// Encapsulation
+let km = MlKem768::encapsulate(issuer_public_key)?;
+let encrypted = MlKem768::encrypt_message(
+    &km.shared_secret,
+    credential_bytes
+)?;
+
+// Décapsulation
+let shared_secret = MlKem768::decapsulate(
+    holder_secret_key,
+    &encrypted.kem_ciphertext
+)?;
+let plaintext = MlKem768::decrypt_message(
+    &shared_secret,
+    &encrypted
+)?;
+\end{lstlisting}
+
+% ============================================================================
+\chapter{Signatures Hybrides (Weak Non-Separability)}
+% ============================================================================
+
+\section{Concept et Motivation}
+
+\subsection{Le Problème}
+
+L'adoption de la cryptographie post-quantique pose une question :
+
+\begin{quote}
+\textit{Comment transitionner de manière sécurisée des systèmes classiques vers post-quantiques ?}
+\end{quote}
+
+Deux approches :
+
+\begin{enumerate}
+  \item \textbf{Migration pure} : Abandonner Ed25519 pour ML-DSA-65 (risque de vulnérabilités non découvertes)
+  \item \textbf{Approche hybride} : Combiner les deux (sécurité renforcée)
+\end{enumerate}
+
+\subsection{Signatures Hybrides}
+
+Combinent ML-DSA-65 (post-quantum) et Ed25519 (classique) en une \textbf{signature composite} où chaque signature valide l'autre.
+
+\section{Architecture HybridSigner}
+
+\subsection{HybridKeyPair}
+
+\begin{lstlisting}[language=Rust]
+pub struct HybridKeyPair {
+    pub pq_public_key: Vec<u8>,        // ML-DSA-65 public (1952 bytes)
+    pub pq_secret_key: Vec<u8>,        // ML-DSA-65 secret (2560 bytes)
+    pub classical_public_key: Vec<u8>, // Ed25519 public (32 bytes)
+    pub classical_secret_key: Vec<u8>, // Ed25519 secret (32 bytes)
+    pub key_id: String,                // blake3(pq_pub || ed_pub)
+    pub created_at: u64,               // Timestamp création
+}
+\end{lstlisting}
+
+\subsection{Génération de Clés Hybrides}
+
+\begin{lstlisting}[language=Rust]
+let signer = HybridSigner::generate()?;
+// Generates:
+// - ML-DSA-65 key pair (3.5 KB)
+// - Ed25519 key pair (64 bytes)
+// - Derived key_id from both keys
+
+let composite_jwk = signer.export_composite_jwk();
+// Exporte clés publiques compatibles IOTA
+\end{lstlisting}
+
+\section{Processus de Signature Composite}
+
+\subsection{Weak Non-Separability (WNS)}
+
+Le concept clé : \textbf{Empêcher l'attaque de stripping} où un adversaire supprime la signature PQC faible pour garder seulement la classique.
+
+Mécanisme :
+\begin{itemize}
+  \item Lier PQ signature et classical signature cryptographiquement
+  \item Inclure entropy aléatoire pour éviter déterminisme
+  \item Valider binding hash pour garantir intégrité du lien
+\end{itemize}
+
+\subsection{Étapes du Processus}
+
+\subsubsection{1. Calcul du Hash du Document}
+
+\begin{lstlisting}[language=Rust]
+let doc_hash = blake3::hash(message);
+let doc_hash_bytes = doc_hash.as_bytes();  // 32 bytes
+\end{lstlisting}
+
+\subsubsection{2. Génération d'Entropie}
+
+\begin{lstlisting}[language=Rust]
+let entropy = self.generate_entropy();  // 16 bytes random
+\end{lstlisting}
+
+L'entropie est : 
+\begin{itemize}
+  \item Générée de manière sécurisée via \texttt{OsRng}
+  \item Incluse dans les deux signatures (binding)
+  \item Vérifiée lors de la validation
+\end{itemize}
+
+\subsubsection{3. Signature Post-Quantique}
+
+\begin{lstlisting}[language=Rust]
+let context = "QSDID-HYBRID-v1" 
+              || doc_hash_bytes 
+              || entropy 
+              || classical_verifying_key.as_bytes()
+              || pq_signer.public_key_bytes();
+
+let pq_signature = pq_signer.sign(&context)?;
+// Result: 3309 bytes
+\end{lstlisting}
+
+La signature PQC signe le \textbf{contexte lié} qui inclut :
+\begin{itemize}
+  \item Version du protocole
+  \item Hash du document
+  \item Entropy aléatoire
+  \item Clés publiques (binding)
+\end{itemize}
+
+\subsubsection{4. Signature Classique}
+
+\begin{lstlisting}[language=Rust]
+let classical_msg = "CLASSIC-WRAPPER-v1"
+                    || doc_hash_bytes
+                    || pq_signature        // BINDING!
+                    || entropy
+                    || classical_verifying_key.as_bytes();
+
+let classical_sig = classical_signer.sign(&classical_msg);
+// Result: 64 bytes
+\end{lstlisting}
+
+La signature classique signe le message qui \textbf{inclut la signature PQC} : création du lien binding.
+
+\subsubsection{5. Binding Hash}
+
+\begin{lstlisting}[language=Rust]
+let mut hasher = blake3::Hasher::new();
+hasher.update(&pq_signature);
+hasher.update(classical_signature.to_bytes().as_ref());
+let binding_hash = hasher.finalize().into();  // 32 bytes
+\end{lstlisting}
+
+\subsection{CompositeSignature Résultante}
+
+\begin{lstlisting}[language=Rust]
+pub struct CompositeSignature {
+    pub classical_signature: Vec<u8>,    // 64 bytes (Ed25519)
+    pub pq_signature: Vec<u8>,           // 3309 bytes (ML-DSA-65)
+    pub algorithm: CompositeAlgId::IdMldsa65Ed25519,
+    pub timestamp: u64,                  // Unix epoch
+    pub binding_hash: [u8; 32],          // Blake3(PQ || Classic)
+    pub document_hash: [u8; 32],         // Blake3(message)
+    pub entropy: [u8; 16],               // Random context binding
+}
+
+// Total size: ~3.5 KB
+\end{lstlisting}
+
+\section{Vérification de Signature Composite}
+
+\subsection{Processus de Vérification}
+
+\begin{enumerate}
+  \item \textbf{Extraire contexte} : Reconstruire le contexte PQ original
+  \item \textbf{Vérifier Ed25519} : Valider signature classique sur classical\_msg
+  \item \textbf{Vérifier ML-DSA-65} : Valider signature PQC sur contexte reconstructed
+  \item \textbf{Vérifier binding hash} : \texttt{Blake3(pq\_sig || classic\_sig) == binding\_hash}
+  \item \textbf{Vérifier document hash} : \texttt{Blake3(message) == stored\_doc\_hash}
+  \item \textbf{Vérifier timestamp} : Intervalle valide (anti-replay)
+\end{enumerate}
+
+\subsection{Conditions de Rejet}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Erreur} & \textbf{Raison} \\
+\hline
+\texttt{WnsViolation} & Signatures non cryptographiquement liées \\
+\hline
+\texttt{HashMismatch} & Document altéré detecté \\
+\hline
+\texttt{TimestampValidationFailed} & Replay attack détecté \\
+\hline
+\texttt{AlgorithmMismatch} & Algo attendu $\neq$ algo reçu \\
+\hline
+\texttt{EntropyMismatch} & Context modifié \\
+\hline
+\texttt{ClassicalVerificationFailed} & Signature Ed25519 invalide \\
+\hline
+\texttt{PqVerificationFailed} & Signature ML-DSA-65 invalide \\
+\hline
+\end{tabular}
+\caption{Conditions de rejet de signature composite}
+\end{table}
+
+% ============================================================================
+\chapter{Stockage et Vérification}
+% ============================================================================
+
+\section{StorageClient (IPFS/Blockchain Integration)}
+
+\subsection{Architecture}
+
+Le \texttt{StorageClient} gère la persistance décentralisée des credentials :
+\begin{itemize}
+  \item Stockage sur IPFS (contenu adressé)
+  \item Enregistrement sur blockchain (anchoring)
+  \item Vérification de signatures distribuée
+\end{itemize}
+
+\subsection{Endpoints REST}
+
+\subsubsection{POST /api/v1/store}
+
+Enregistre un credential signé :
+
+\begin{lstlisting}[language=json]
+Request Body:
+{
+  "claims": {...},
+  "metadata": {
+    "type": "PersonalIdentity",
+    "issuer": "did:iota:main:xyz...",
+    "holder": "did:iota:main:abc...",
+    "credentialId": "uuid",
+    "issued_at": "2026-04-16T10:00:00Z",
+    "ai_result": {
+      "fraud_score": 0.05,
+      "heatmap_hash": "blake3hash..."
+    }
+  },
+  "signature": "base64_encoded_composite_signature"
+}
+
+Response:
+{
+  "success": true,
+  "credentialId": "uuid",
+  "rootCid": "QmXxxx..."  // IPFS CID
+}
+\end{lstlisting}
+
+\subsubsection{GET /api/v1/retrieve/{rootCid}}
+
+Récupère et valide un credential :
+
+\begin{lstlisting}[language=json]
+Query Parameters:
+?issuerPubKey=hex_encoded_public_key
+
+Response:
+{
+  "success": true,
+  "claims": {...},
+  "metadata": {...},
+  "image": "base64_image",
+  "signatureValid": true
+}
+\end{lstlisting}
+
+\subsubsection{GET /health}
+
+Heartbeat du service :
+
+\begin{lstlisting}
+Response: HTTP 200 OK
+\end{lstlisting}
+
+\section{PQC Verifier}
+
+\subsection{Trait JwsVerifier}
+
+L'interface \texttt{JwsVerifier} implémente la vérification généralisée :
+
+\begin{lstlisting}[language=Rust]
+pub trait JwsVerifier {
+    fn verify_signature(
+        &self,
+        message: &[u8],
+        signature: &[u8],
+        public_key: &Jwk
+    ) -> Result<bool>;
+}
+\end{lstlisting}
+
+\subsection{Intégration Pipeline JOSE}
+
+\begin{enumerate}
+  \item Recevoir JWS avec algorithm header
+  \item Extraire public key (Jwk)
+  \item Sélectionner verifier approprié (classique ou PQC)
+  \item Valider signature
+  \item Retourner résultat
+\end{enumerate}
+
+\subsection{Support d'Algorithmes}
+
+\begin{itemize}
+  \item \textbf{Classiques} : ES256, EdDSA, RS256, etc.
+  \item \textbf{Post-Quantiques} : id-MLDSA44-Ed25519, id-MLDSA65-Ed25519
+  \item \textbf{Détection automatique} : Basée sur algorithm header
+\end{itemize}
+
+% ============================================================================
+\chapter{Flux Complet d'un Credential}
+% ============================================================================
+
+\section{Flux End-to-End}
+
+\subsection{Phase 1: Création d'Identité}
+
+\begin{enumerate}
+  \item Émetteur génère DID : \texttt{did:iota:main:hash(public\_keys)}
+  \item Génère HybridKeyPair (ML-DSA-65 + Ed25519)
+  \item Crée CustomCompositeJwk pour exportation
+  \item Stocke clés privées dans HSM/Vault sécurisé
+  \item Publie clés publiques sur blockchain
+\end{enumerate}
+
+\subsection{Phase 2: Création Credential}
+
+\begin{enumerate}
+  \item Émetteur collecte données holder
+  \item Crée CredentialData :
+  \begin{itemize}
+    \item claims : données personnelles
+    \item metadata : émetteur/holder DID, uuid
+    \item ai\_result : fraude score
+    \item image : photo document
+  \end{itemize}
+  \item Valide intégrité des données
+\end{enumerate}
+
+\subsection{Phase 3: Signature Composite}
+
+\begin{enumerate}
+  \item Blake3(credential) → doc\_hash
+  \item Random(16) → entropy
+  \item ML-DSA-65.sign(context) → pq\_signature (3309 bytes)
+  \item Ed25519.sign(classical\_msg avec pq\_sig) → 64 bytes
+  \item Blake3(pq\_sig || classic\_sig) → binding\_hash
+  \item Composé : CompositeSignature (~3.5 KB)
+\end{enumerate}
+
+\subsection{Phase 4: Stockage Distribué}
+
+\begin{enumerate}
+  \item Encodage JSON + base64
+  \item POST → StorageClient.store\_credential()
+  \item Blockchain anchoring (transaction)
+  \item IPFS storage (rootCid = Qm...)
+  \item Retour credentialId et rootCid au holder
+\end{enumerate}
+
+\subsection{Phase 5: Vérification}
+
+Holder/Verifier récupère credential :
+
+\begin{enumerate}
+  \item GET /api/v1/retrieve/{rootCid}?issuerPubKey={hex}
+  \item Extraction issuer\_did
+  \item Récupération public key depuis ledger
+  \item Validation 6 conditions :
+  \begin{enumerate}
+    \item Ed25519 signature valide ?
+    \item ML-DSA-65 signature valide ?
+    \item Binding hash correspondant ?
+    \item Document hash correspond ?
+    \item Timestamp dans fenêtre valide ?
+    \item Entropy consistent ?
+  \end{enumerate}
+  \item Résultat : credential accepté ✓ ou rejeté ✗
+\end{enumerate}
+
+\section{Diagramme de Flux}
+
+\begin{lstlisting}
+┌──────────────────────────────────────────────────────┐
+│ 1. CREATION D'IDENTITÉ                               │
+├──────────────────────────────────────────────────────┤
+│  DID ← hash(public_keys)                             │
+│  HybridKeyPair: ML-DSA-65 + Ed25519                 │
+│  CustomCompositeJwk pour exportation                 │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│ 2. CREATION CREDENTIAL                               │
+├──────────────────────────────────────────────────────┤
+│  CredentialData: claims, metadata, ai_result, image │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│ 3. SIGNATURE COMPOSITE                               │
+├──────────────────────────────────────────────────────┤
+│  ML-DSA-65.sign(context) → 3309 bytes                │
+│  Ed25519.sign(classical_msg) → 64 bytes              │
+│  Blake3(pq_sig || classic_sig) → binding_hash        │
+│  Total: ~3.5 KB                                      │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│ 4. STOCKAGE DISTRIBUÉ                                │
+├──────────────────────────────────────────────────────┤
+│  StorageClient.store_credential()                    │
+│  Blockchain anchoring + IPFS storage                 │
+│  Response: rootCid = Qm...                           │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│ 5. VERIFICATION (Holder/Verifier)                    │
+├──────────────────────────────────────────────────────┤
+│  GET /api/v1/retrieve/{rootCid}                      │
+│  Validate 6 conditions:                              │
+│    ✓ Ed25519 valid?                                  │
+│    ✓ ML-DSA-65 valid?                                │
+│    ✓ Binding hash match?                             │
+│    ✓ Document hash match?                            │
+│    ✓ Timestamp valid?                                │
+│    ✓ Entropy consistent?                             │
+│  Result: ✓ Accepted or ✗ Rejected                    │
+└──────────────────────────────────────────────────────┘
+\end{lstlisting}
+
+% ============================================================================
+\chapter{Sécurité et Protections}
+% ============================================================================
+
+\section{Matrice de Sécurité}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Aspect} & \textbf{Protection} & \textbf{Mécanisme} \\
+\hline
+\textbf{Confidentialité} & ML-KEM-768 + AES-256-GCM & Chiffrement hybride PQC \\
+\hline
+\textbf{Intégrité} & Blake3 (double-hash) & Doc hash + signature hash \\
+\hline
+\textbf{Authenticité} & CompositeSignature & PQC + Classic binding \\
+\hline
+\textbf{Non-Répudiation} & Signatures digitales & Clés publiques vérifiables \\
+\hline
+\textbf{Résistance Quantique} & ML-DSA-65 (FIPS 204) & NIST standardisé \\
+\hline
+\textbf{Attaque Stripping} & WNS (Weak Non-Separability) & Contexte + entropie lié \\
+\hline
+\textbf{Replay Attack} & Timestamp validation & Fenêtre temporelle stricte \\
+\hline
+\textbf{Tampering} & Document hash & Detection modification \\
+\hline
+\textbf{Clés Compromises} & Revocation registry & Credential registry \\
+\hline
+\end{tabular}
+\caption{Matrice de sécurité QSDID}
+\end{table}
+
+\section{Attaques Mitigées}
+
+\subsection{Attaque Quantique}
+
+\begin{itemize}
+  \item \textbf{ML-DSA-65} : Fondé sur problème lattice difficile même quantiquement
+  \item \textbf{Hardness Assumption} : LWE (Learning With Errors) pas d'algorithme poly-temps
+  \item \textbf{Sécurité} : 128-bit classique = 192-bit lattice
+\end{itemize}
+
+\subsection{Attaque de Stripping}
+
+\begin{itemize}
+  \item \textbf{Problème} : Adversaire supprime PQC, garde seulement classique
+  \item \textbf{Solution} : WNS - inclure PQ\_sig dans classical\_msg
+  \item \textbf{Validation} : Vérifier binding hash = Blake3(PQ || Classic)
+\end{itemize}
+
+\subsection{Attaque Replay}
+
+\begin{itemize}
+  \item \textbf{Problème} : Replay old credentials
+  \item \textbf{Solution} : Timestamp + nonce + entropy
+  \item \textbf{Validation} : Temps dans $\pm 5$ minutes (configurable)
+\end{itemize}
+
+\subsection{Attaque Man-in-the-Middle}
+
+\begin{itemize}
+  \item \textbf{Problème} : Interception et modification
+  \item \textbf{Solution} : Blake3(document) + dual signatures
+  \item \textbf{Détection} : HashMismatch error
+\end{itemize}
+
+\section{Gestion des Clés}
+
+\subsection{Cycles de Vie}
+
+\begin{enumerate}
+  \item \textbf{Génération} : OsRng cryptographiquement sécurisé
+  \item \textbf{Stockage} : HSM/Vault (clés privées jamais en RAM)
+  \item \textbf{Backup} : Chiffrement + distribution géographique
+  \item \textbf{Rotation} : Nouvelle paire, revocation ancienne
+  \item \textbf{Révocation} : Enregistrement dans registry
+\end{enumerate}
+
+\subsection{Memory Safety}
+
+\begin{itemize}
+  \item \textbf{Rust} : Pas d'accès mémoire après-libération
+  \item \textbf{zeroize} : Effacement sécurisé de clés en RAM
+  \item \textbf{OsRng} : RNG système hautement entropique
+\end{itemize}
+
+% ============================================================================
+\chapter{Dépendances Cryptographiques}
+% ============================================================================
+
+\section{Stack Cryptographique}
+
+\begin{lstlisting}
+Workspace dependencies:
+├── oqs (0.11)              # liboqs-rust (OpenQuantumSafe)
+│   └─ ML-DSA-65 (FIPS 204)
+│   └─ ML-KEM-768 (FIPS 203)
+├── iota-crypto (0.23.2)    # Ed25519, SHA
+├── ed25519-dalek (2.1)     # Signatures Ed25519
+├── aes-gcm (0.10)          # Chiffrement authentifié
+├── blake3 (1.5)            # Hachage cryptographique
+├── serde_json              # Sérialisation JSON
+├── bls12_381_plus          # Courbes elliptiques
+├── zeroize                 # Effacement mémoire
+├── anyhow, thiserror       # Gestion erreurs
+├── hex, base64             # Encodages
+└── rand (0.8.5)            # Entropie CSPRNG
+\end{lstlisting}
+
+\subsection{Chaîne de Confiance}
+
+\begin{enumerate}
+  \item \textbf{NIST} approuve ML-DSA-65 et ML-KEM-768
+  \item \textbf{OpenQuantumSafe} implémente avec rigor
+  \item \textbf{liboqs-rust} binding sécurisé
+  \item \textbf{iota-crypto} utilitaires validés
+  \item \textbf{Projet QSDID} intégration et validation
+\end{enumerate}
+
+% ============================================================================
+\chapter{Architecture Globale}
+% ============================================================================
+
+\section{Diagramme d'Architecture}
+
+\begin{lstlisting}
+┌────────────────────── QSDID Platform ──────────────┐
+│                                                     │
+│  ┌─── Identity Layer ───────────────────────────┐ │
+│  │ DID + CredentialData + Metadata              │ │
+│  │ (Decentralized + Verifiable)                 │ │
+│  └────────────────────────────────────────────┘ │
+│                     │                             │
+│  ┌─── Crypto Layer ──────────────────────────┐ │ │
+│  │                                            │ │ │
+│  │  ┌─ Classical ────┐  ┌─ Post-Quantum ──┐ │ │ │
+│  │  │ Ed25519 (64B)  │  │ ML-DSA-65      │ │ │ │
+│  │  │ K256/P256      │  │ (3309B)        │ │ │ │
+│  │  │                │  │ ML-KEM-768     │ │ │ │
+│  │  └────────────────┘  └────────────────┘ │ │ │
+│  │        ▲                      ▲          │ │ │
+│  │        └──────────┬───────────┘          │ │ │
+│  │                ▼                         │ │ │
+│  │          Hybrid Signatures               │ │ │
+│  │      (WNS Binding + Entropy)            │ │ │
+│  │                                          │ │ │
+│  └──────────────────────────────────────────┘ │ │
+│                     │                          │
+│  ┌─── JWK Encapsulation ───────────────────┐ │ │
+│  │                                          │ │ │
+│  │  TraditionalJwk  CompositeJwk  PQCJwk   │ │ │
+│  │  (RSA,EC,OKP)    (Hybrid)      (AKP)    │ │ │
+│  │                                          │ │ │
+│  └──────────────────────────────────────────┘ │ │
+│                     │                          │
+│  ┌─── Storage Layer ────────────────────────┐ │ │
+│  │ IPFS/Blockchain (rootCid) + Registry     │ │ │
+│  │ StorageClient REST API                   │ │ │
+│  └──────────────────────────────────────────┘ │ │
+│                                                │
+└────────────────────────────────────────────────┘
+\end{lstlisting}
+
+\section{Résumé Exécutif}
+
+La plateforme QSDID implémente une architecture d'identité décentralisée hautement sécurisée :
+
+\begin{enumerate}
+  \item \textbf{Identités Décentralisées} : DIDs vérifiables, sans autorité centrale
+  \item \textbf{Credentials Signés} : Signatures hybrides avec double validation
+  \item \textbf{Résistance Quantique} : ML-DSA-65 et ML-KEM-768 (NIST FIPS 204/203)
+  \item \textbf{Encapsulation Clés} : JWK, CompositeJwk, PostQuantumJwk
+  \item \textbf{Stockage Distribué} : IPFS + Blockchain anchoring
+  \item \textbf{Vérification Robuste} : Six étapes de validation de signature
+  \item \textbf{Protection Multi-niveaux} : Confidentialité, intégrité, authenticité, non-répudiation
+\end{enumerate}
+
+% ============================================================================
+\appendix
+
+\chapter{Glossaire}
+
+\begin{description}
+  \item[DID] Decentralized Identifier (Identifiant Décentralisé)
+  \item[JWK] JSON Web Key (Clé Web JSON)
+  \item[JWS] JSON Web Signature (Signature Web JSON)
+  \item[JWT] JSON Web Token (Token Web JSON)
+  \item[JOSE] JSON Object Signing and Encryption
+  \item[ML-DSA-65] Module-Lattice Digital Signature (NIST FIPS 204)
+  \item[ML-KEM-768] Module-Lattice Key Encapsulation Mechanism (NIST FIPS 203)
+  \item[PQC] Post-Quantum Cryptography
+  \item[WNS] Weak Non-Separability
+  \item[AEAD] Authenticated Encryption with Associated Data
+  \item[OKP] Octet string key pairs
+  \item[AKP] Asymmetric Key Pair (post-quantum)
+  \item[HSM] Hardware Security Module
+  \item[IPFS] InterPlanetary File System
+  \item[CID] Content Identifier
+  \item[CSPRNG] Cryptographically Secure Pseudo-Random Number Generator
+\end{description}
+
+\chapter{Ressources}
+
+\section{Standards}
+
+\begin{itemize}
+  \item NIST FIPS 204 : Module-Lattice-Based Digital Signature Standard
+  \item NIST FIPS 203 : Module-Lattice-Based Key-Encapsulation Mechanism
+  \item W3C DID Core 1.0 : https://www.w3.org/TR/did-core/
+  \item RFC 7517 : JSON Web Key (JWK)
+  \item RFC 7515 : JSON Web Signature (JWS)
+  \item RFC 7519 : JSON Web Token (JWT)
+\end{itemize}
+
+\section{Références Utiles}
+
+\begin{itemize}
+  \item Open Quantum Safe : https://openquantumsafe.org/
+  \item IOTA Identity Framework : https://docs.iota.org/iota-identity
+  \item Rust Cryptography : https://www.rust-lang.org/what/wg-crypto/
+  \item Post-Quantum Cryptography : https://csrc.nist.gov/projects/post-quantum-cryptography/
+\end{itemize}
+
+\end{document}

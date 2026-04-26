@@ -1,0 +1,225 @@
+{
+  "_format": "hh-sol-cache-2",
+  "files": {
+    "/mnt/c/Users/msi/Desktop/PFE/QSDID-Platform/backend/qsdid-contracts/contracts/CommitmentRegistry.sol": {
+      "lastModificationDate": 1776872008212,
+      "contentHash": "c5ae4ecbf1220ceb33724e2a9c7117b0",
+      "sourceName": "contracts/CommitmentRegistry.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "mode": "3",
+            "runs": 200
+          },
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          },
+          "libraries": {}
+        },
+        "zksolc": {
+          "version": "1.4.0",
+          "compilerSource": "binary",
+          "settings": {
+            "optimizer": {
+              "enabled": true,
+              "mode": "3",
+              "runs": 200
+            },
+            "compilerPath": "/home/asma/.cache/hardhat-nodejs/compilers-v2/zksolc/zksolc-v1.4.0",
+            "missingLibrariesPath": "./.zksolc-libraries-cache/missingLibraryDependencies.json",
+            "areLibrariesMissing": false,
+            "experimental": {},
+            "libraries": {},
+            "enableEraVMExtensions": false,
+            "forceEVMLA": false
+          }
+        }
+      },
+      "imports": [
+        "./UserRegistry.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.24"
+      ],
+      "artifacts": [
+        "CommitmentRegistry"
+      ]
+    },
+    "/mnt/c/Users/msi/Desktop/PFE/QSDID-Platform/backend/qsdid-contracts/contracts/UserRegistry.sol": {
+      "lastModificationDate": 1776872008233,
+      "contentHash": "8078369a0a34954042cda16338b840b0",
+      "sourceName": "contracts/UserRegistry.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "mode": "3",
+            "runs": 200
+          },
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          },
+          "libraries": {}
+        },
+        "zksolc": {
+          "version": "1.4.0",
+          "compilerSource": "binary",
+          "settings": {
+            "optimizer": {
+              "enabled": true,
+              "mode": "3",
+              "runs": 200
+            },
+            "compilerPath": "/home/asma/.cache/hardhat-nodejs/compilers-v2/zksolc/zksolc-v1.4.0",
+            "missingLibrariesPath": "./.zksolc-libraries-cache/missingLibraryDependencies.json",
+            "areLibrariesMissing": false,
+            "experimental": {},
+            "libraries": {},
+            "enableEraVMExtensions": false,
+            "forceEVMLA": false
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.24"
+      ],
+      "artifacts": [
+        "UserRegistry"
+      ]
+    },
+    "/mnt/c/Users/msi/Desktop/PFE/QSDID-Platform/backend/qsdid-contracts/contracts/CredentialRegistry.sol": {
+      "lastModificationDate": 1776872008222,
+      "contentHash": "69c29d256f6f7ee7164e005a68f9c681",
+      "sourceName": "contracts/CredentialRegistry.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "mode": "3",
+            "runs": 200
+          },
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          },
+          "libraries": {}
+        },
+        "zksolc": {
+          "version": "1.4.0",
+          "compilerSource": "binary",
+          "settings": {
+            "optimizer": {
+              "enabled": true,
+              "mode": "3",
+              "runs": 200
+            },
+            "compilerPath": "/home/asma/.cache/hardhat-nodejs/compilers-v2/zksolc/zksolc-v1.4.0",
+            "missingLibrariesPath": "./.zksolc-libraries-cache/missingLibraryDependencies.json",
+            "areLibrariesMissing": false,
+            "experimental": {},
+            "libraries": {},
+            "enableEraVMExtensions": false,
+            "forceEVMLA": false
+          }
+        }
+      },
+      "imports": [
+        "./UserRegistry.sol"
+      ],
+      "versionPragmas": [
+        "^0.8.24"
+      ],
+      "artifacts": [
+        "CredentialRegistry"
+      ]
+    },
+    "/mnt/c/Users/msi/Desktop/PFE/QSDID-Platform/backend/qsdid-contracts/contracts/VerificationOracle.sol": {
+      "lastModificationDate": 1776872008243,
+      "contentHash": "8c549e6001c75fd808dfda12494645ab",
+      "sourceName": "contracts/VerificationOracle.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "mode": "3",
+            "runs": 200
+          },
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          },
+          "libraries": {}
+        },
+        "zksolc": {
+          "version": "1.4.0",
+          "compilerSource": "binary",
+          "settings": {
+            "optimizer": {
+              "enabled": true,
+              "mode": "3",
+              "runs": 200
+            },
+            "compilerPath": "/home/asma/.cache/hardhat-nodejs/compilers-v2/zksolc/zksolc-v1.4.0",
+            "missingLibrariesPath": "./.zksolc-libraries-cache/missingLibraryDependencies.json",
+            "areLibrariesMissing": false,
+            "experimental": {},
+            "libraries": {},
+            "enableEraVMExtensions": false,
+            "forceEVMLA": false
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "^0.8.24"
+      ],
+      "artifacts": [
+        "VerificationOracle"
+      ]
+    }
+  }
+}

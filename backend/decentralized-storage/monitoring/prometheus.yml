@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Storage Manager (Node.js service)
+  - job_name: 'qsdid-storage-manager'
+    static_configs:
+      - targets: ['storage-manager:9091']
+
+  # Kubo nodes expose Prometheus metrics at /debug/metrics/prometheus
+  - job_name: 'kubo-node-1'
+    metrics_path: /debug/metrics/prometheus
+    static_configs:
+      - targets: ['ipfs-node-1:5001']
+
+  - job_name: 'kubo-node-2'
+    metrics_path: /debug/metrics/prometheus
+    static_configs:
+      - targets: ['ipfs-node-2:5001']
+
+  - job_name: 'kubo-node-3'
+    metrics_path: /debug/metrics/prometheus
+    static_configs:
+      - targets: ['ipfs-node-3:5001']
+
+  # Redis exporter (optional – add redis-exporter container to compose)
+  # - job_name: 'redis'
+  #   static_configs:
+  #     - targets: ['redis-exporter:9121']
