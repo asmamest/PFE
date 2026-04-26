@@ -113,6 +113,7 @@ fn save_signature(signed_doc: &SignedDocument, output_path: &Path) -> Result<()>
 }
 
 // Charger une signature depuis un fichier JSON
+#[allow(dead_code)]
 fn load_signature(signature_path: &Path) -> Result<SignedDocument> {
     let json = fs::read_to_string(signature_path)?;
     let signed_doc: SignedDocument = serde_json::from_str(&json)?;
@@ -127,7 +128,7 @@ fn test_tamper_detection_real(signer: &PqcSigner, file_path: &Path) -> Result<()
     let signature = signer.sign(&file_bytes)?;
     
     // Vérifier original
-    let original_valid = signer.verify(&file_bytes, &signature)?;
+    let _original_valid  = signer.verify(&file_bytes, &signature)?;
     println!("      ✅ Original file: VALID");
     
     // Créer une version falsifiée (modifier 1 byte)

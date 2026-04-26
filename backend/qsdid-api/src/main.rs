@@ -6,10 +6,10 @@
 //! Post-Quantum Hybrid Signatures (ML-DSA-65 + Ed25519) + KEM
 
 use axum::{
-    extract::{Path, Query},
+    extract::{Path, State as AxumState},
     response::{Json, IntoResponse},
     http::StatusCode,
-    Router, routing::{get, post, delete},
+    Router, routing::{get, post, put, delete},
 };
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
@@ -21,6 +21,7 @@ use base64::Engine;
 
 use hybrid_signer::{HybridSigner, HybridVerifier, CompositeSignature, CustomCompositeJwk};
 use pqc_ml_kem::{MlKem768, EncryptedMessage, KeyPair as KemKeyPair};
+use identity_did::{CoreDID, DID};
 
 // ============================================================================
 // Application State
@@ -30,6 +31,8 @@ use pqc_ml_kem::{MlKem768, EncryptedMessage, KeyPair as KemKeyPair};
 struct AppState {
     signatures: Arc<Mutex<HashMap<String, SignatureEntry>>>,
     kem_keys: Arc<Mutex<HashMap<String, KemKeyPair>>>,
+    challenges: Arc<Mutex<HashMap<String, ChallengeEntry>>>,
+    dids: Arc<Mutex<HashMap<String, DIDEntry>>>,
 }
 
 #[derive(Clone)]
@@ -43,6 +46,13 @@ struct SignatureEntry {
     document_name: Option<String>,
 }
 
+#[derive(Clone)]
+struct ChallengeEntry {
+    nonce: String,
+    expires_at: i64,
+    used: bool,
+}
+
 // ============================================================================
 // Request/Response Models
 // ============================================================================
@@ -51,6 +61,7 @@ struct SignatureEntry {
 struct SignRequest {
     document: String,  // Base64 encoded document
     document_name: Option<String>,
+    challenge_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +89,46 @@ struct VerifyResponse {
 }
 
 // ============================================================================
+// DID Models
+// ============================================================================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DIDDocument {
+    pub id: String,
+    pub method: String,
+    pub method_id: String,
+    pub controller: Option<String>,
+    pub verification_methods: Vec<VerificationMethod>,
+    pub authentication: Vec<String>,
+    pub created: String,
+    pub updated: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VerificationMethod {
+    pub id: String,
+    pub r#type: String,
+    pub controller: String,
+    pub public_key_jwk: Option<serde_json::Value>,
+    pub public_key_multibase: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateDIDRequest {
+    pub method: String,
+    pub method_id: String,
+    pub key_id: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct DIDEntry {
+    pub did: String,
+    pub document: DIDDocument,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub key_id: Option<String>,
+}
+
+// ============================================================================
 // API Handlers
 // ============================================================================
 
@@ -88,6 +139,38 @@ async fn health() -> Json<serde_json::Value> {
         "algorithms": ["ML-DSA-65", "Ed25519", "ML-KEM-768"],
         "features": ["Weak Non-Separability (WNS)", "Composite Signatures", "Post-Quantum Encryption"]
     }))
+}
+
+async fn generate_challenge(
+    state: axum::extract::State<AppState>,
+) -> impl IntoResponse {
+    
+    
+    // Générer un nonce sécurisé
+    let nonce = Uuid::new_v4().to_string();
+    
+    let challenge_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+    let expires_at = now + 60; // Expire dans 60 secondes
+    
+    let challenge = ChallengeEntry {
+        nonce: nonce.clone(),
+        expires_at,
+        used: false,
+    };
+    
+    {
+        let mut challenges = state.challenges.lock().unwrap();
+        challenges.insert(challenge_id.clone(), challenge);
+    }
+    
+    info!("Generated challenge '{}' expires at {}", challenge_id, expires_at);
+    
+    (StatusCode::OK, Json(serde_json::json!({
+        "challenge_id": challenge_id,
+        "nonce": nonce,
+        "expires_at": expires_at
+    })))
 }
 
 async fn generate_keys() -> impl IntoResponse {
@@ -117,42 +200,94 @@ async fn sign_document(
     Json(req): Json<SignRequest>,
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
-    
+
+    // ===== VÉRIFICATION DU CHALLENGE (AJOUTER CETTE SECTION) =====
+    if let Some(challenge_id) = &req.challenge_id {
+        let mut challenges = state.challenges.lock().unwrap();
+        
+        if let Some(challenge) = challenges.get_mut(challenge_id) {
+            let now = chrono::Utc::now().timestamp();
+            
+            if now > challenge.expires_at {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "error": "Challenge expired"
+                })));
+            }
+            
+            if challenge.used {
+                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "error": "Challenge already used"
+                })));
+            }
+            
+            // Décoder le document pour vérifier le nonce
+            let document_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
+                Ok(d) => d,
+                Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "error": format!("Invalid base64: {}", e)
+                }))),
+            };
+            
+            // Essayer de parser le JSON pour vérifier le nonce
+            if let Ok(doc_str) = String::from_utf8(document_bytes.clone()) {
+                if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&doc_str) {
+                    let nonce_in_doc = json_value.get("nonce").and_then(|v| v.as_str());
+                    
+                    if nonce_in_doc != Some(&challenge.nonce) {
+                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                            "error": "Nonce mismatch"
+                        })));
+                    }
+                }
+            }
+            
+            // Marquer le challenge comme utilisé
+            challenge.used = true;
+            info!("Challenge '{}' verified and marked as used", challenge_id);
+        } else {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "error": format!("Challenge '{}' not found", challenge_id)
+            })));
+        }
+    }
+    // ===== FIN DE LA VÉRIFICATION =====
+
+    // Le reste du code de signature reste identique...
     let document_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
         Ok(d) => d,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
             "error": format!("Invalid base64: {}", e)
         }))),
     };
-    
+
+    // ... tout le code existant de signature ...
     let signer = match HybridSigner::generate() {
         Ok(s) => s,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
             "error": format!("Signer failed: {}", e)
         }))),
     };
-    
-    // Récupérer la clé publique AVANT de signer
+
     let public_key_jwk = signer.export_composite_jwk();
-    
+
     let signature = match signer.sign_composite(&document_bytes) {
         Ok(s) => s,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
             "error": format!("Signing failed: {}", e)
         }))),
     };
-    
+
     let signature_json = match signature.to_json() {
         Ok(j) => j,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
             "error": format!("Serialization failed: {}", e)
         }))),
     };
-    
+
     let signature_id = format!("sig_{}", Uuid::new_v4().simple());
     let document_hash_hex = hex::encode(&signature.document_hash);
     let signature_size = signature.pq_signature.len() + signature.classical_signature.len();
-    
+
     {
         let mut signatures = state.signatures.lock().unwrap();
         signatures.insert(signature_id.clone(), SignatureEntry {
@@ -164,10 +299,10 @@ async fn sign_document(
             document_name: req.document_name,
         });
     }
-    
+
     let elapsed = start.elapsed();
     info!("Signed document '{}' in {:?}", signature_id, elapsed);
-    
+
     (StatusCode::CREATED, Json(serde_json::json!({
         "signature_id": signature_id,
         "signature_json": signature_json,
@@ -178,6 +313,8 @@ async fn sign_document(
         "signing_time_ms": elapsed.as_millis(),
     })))
 }
+
+
 
 async fn verify_signature(
     state: axum::extract::State<AppState>,
@@ -320,6 +457,7 @@ async fn get_stats(state: axum::extract::State<AppState>) -> Json<serde_json::Va
         }
     }))
 }
+
 
 // ============================================================================
 // KEM Handlers
@@ -478,6 +616,343 @@ async fn kem_decrypt(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
 }
 
 // ============================================================================
+// DID Handlers
+// ============================================================================
+
+async fn create_did(
+    AxumState(state): AxumState<AppState>,
+    Json(req): Json<CreateDIDRequest>,
+) -> impl IntoResponse {
+    
+    // Valider le method name avec ta logique Rust
+    if let Err(e) = identity_did::CoreDID::valid_method_name(&req.method) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid method name: {}", e)
+        })));
+    }
+    
+    // Valider le method_id
+    if let Err(e) = identity_did::CoreDID::valid_method_id(&req.method_id) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid method id: {}", e)
+        })));
+    }
+    
+    // Construire le DID
+    let did_string = format!("did:{}:{}", req.method, req.method_id);
+    let did = match identity_did::CoreDID::parse(&did_string) {
+
+    Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid DID: {}", e)
+        }))),
+    };
+    
+    // Vérifier si on doit lier à une clé existante
+    let verification_methods = if let Some(key_id) = &req.key_id {
+        let signatures = state.signatures.lock().unwrap();
+        if let Some(entry) = signatures.get(key_id) {
+            vec![VerificationMethod {
+                id: format!("{}#{}", did_string, key_id),
+                r#type: "CompositeVerificationKey2024".to_string(),
+                controller: did_string.clone(),
+                public_key_jwk: Some(serde_json::to_value(&entry.public_key_jwk).unwrap_or_default()),
+                public_key_multibase: None,
+            }]
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+    
+    let now = chrono::Utc::now();
+    let did_document = DIDDocument {
+        id: did_string.clone(),
+        method: req.method,
+        method_id: req.method_id,
+        controller: Some(did_string.clone()),
+        verification_methods,
+        authentication: vec![format!("{}#authentication", did_string)],
+        created: now.to_rfc3339(),
+        updated: now.to_rfc3339(),
+    };
+    
+    let entry = DIDEntry {
+        did: did_string.clone(),
+        document: did_document.clone(),
+        created_at: now,
+        key_id: req.key_id,
+    };
+    
+    {
+        let mut dids = state.dids.lock().unwrap();
+        dids.insert(did_string.clone(), entry);
+    }
+    
+    info!("Created DID: {}", did_string);
+    
+    (StatusCode::CREATED, Json(serde_json::json!({
+        "did": did_string,
+        "did_document": did_document,
+        "did_validation": {
+            "scheme": did.scheme(),
+            "method": did.method(),
+            "method_id": did.method_id(),
+            "authority": did.authority(),
+            "is_valid": true
+        }
+    })))
+}
+
+async fn resolve_did(
+    AxumState(state): AxumState<AppState>,
+    Path(did_string): Path<String>,
+) -> impl IntoResponse {
+    use identity_did::DID;
+    
+    // Valider le format DID avec ta logique Rust
+    let did = match identity_did::CoreDID::parse(&did_string) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid DID format: {}", e)
+        }))),
+    };
+    
+    let dids = state.dids.lock().unwrap();
+    
+    match dids.get(&did_string) {
+        Some(entry) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "did": entry.did,
+                "did_document": entry.document,
+                "resolved_at": chrono::Utc::now().to_rfc3339(),
+                "validation": {
+                    "scheme": did.scheme(),
+                    "method": did.method(),
+                    "method_id": did.method_id(),
+                    "authority": did.authority()
+                }
+            })))
+        }
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": format!("DID '{}' not found", did_string)
+        }))),
+    }
+}
+
+async fn validate_did(
+    Path(did_string): Path<String>,
+) -> impl IntoResponse {
+    use identity_did::DID;
+    
+    match identity_did::CoreDID::parse(&did_string) {
+        Ok(did) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "valid": true,
+                "did": did_string,
+                "scheme": did.scheme(),
+                "method": did.method(),
+                "method_id": did.method_id(),
+                "authority": did.authority(),
+                "normalized": did.as_str(),
+            })))
+        }
+        Err(e) => {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "valid": false,
+                "error": e.to_string()
+            })))
+        }
+    }
+}
+
+async fn list_dids(
+    AxumState(state): AxumState<AppState>,
+) -> impl IntoResponse {
+    let dids = state.dids.lock().unwrap();
+    
+    let did_list: Vec<_> = dids.iter().map(|(id, entry)| {
+        serde_json::json!({
+            "did": id,
+            "method": entry.document.method,
+            "method_id": entry.document.method_id,
+            "created_at": entry.created_at.to_rfc3339(),
+            "verification_methods": entry.document.verification_methods.len(),
+            "linked_key": entry.key_id,
+        })
+    }).collect();
+    
+    Json(serde_json::json!({
+        "dids": did_list,
+        "count": did_list.len()
+    }))
+}
+
+async fn create_did_from_key(
+    AxumState(state): AxumState<AppState>,
+    Path(key_id): Path<String>,
+) -> impl IntoResponse {
+    use identity_did::DID;
+    
+    // Récupérer la clé publique
+    let public_key_jwk = {
+        let signatures = state.signatures.lock().unwrap();
+        match signatures.get(&key_id) {
+            Some(entry) => entry.public_key_jwk.clone(),
+            None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({
+                "error": format!("Key '{}' not found", key_id)
+            }))),
+        }
+    };
+    
+    // Générer un method_id basé sur la clé (UUID court)
+    let method_id = format!("key-{}", key_id);
+    let did_string = format!("did:qsid:{}", method_id);
+    
+    let did = match identity_did::CoreDID::parse(&did_string) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("Failed to create DID: {}", e)
+        }))),
+    };
+    
+    let now = chrono::Utc::now();
+    let did_document = DIDDocument {
+        id: did_string.clone(),
+        method: "qsid".to_string(),
+        method_id: method_id.clone(),
+        controller: Some(did_string.clone()),
+        verification_methods: vec![VerificationMethod {
+            id: format!("{}#{}", did_string, key_id),
+            r#type: "CompositeVerificationKey2024".to_string(),
+            controller: did_string.clone(),
+            public_key_jwk: Some(serde_json::to_value(&public_key_jwk).unwrap_or_default()),
+            public_key_multibase: None,
+        }],
+        authentication: vec![format!("{}#authentication", did_string)],
+        created: now.to_rfc3339(),
+        updated: now.to_rfc3339(),
+    };
+    
+    let entry = DIDEntry {
+        did: did_string.clone(),
+        document: did_document,
+        created_at: now,
+        key_id: Some(key_id.clone()),
+    };
+    
+    {
+        let mut dids = state.dids.lock().unwrap();
+        dids.insert(did_string.clone(), entry);
+    }
+    
+    info!("Created DID from key {}: {}", key_id, did_string);
+    
+    (StatusCode::CREATED, Json(serde_json::json!({
+        "did": did_string,
+        "did_document": {
+            "id": did_string,
+            "verification_methods_count": 1,
+            "created": now.to_rfc3339()
+        },
+        "linked_key": key_id
+    })))
+}
+
+async fn delete_did(
+    AxumState(state): AxumState<AppState>,
+    Path(did_string): Path<String>,
+) -> impl IntoResponse {
+    let mut dids = state.dids.lock().unwrap();
+    
+    if dids.remove(&did_string).is_some() {
+        info!("Deleted DID: {}", did_string);
+        (StatusCode::OK, Json(serde_json::json!({
+            "message": format!("DID '{}' deleted", did_string)
+        })))
+    } else {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": format!("DID '{}' not found", did_string)
+        })))
+    }
+}
+
+async fn update_did_document(
+    AxumState(state): AxumState<AppState>,
+    Path(did_string): Path<String>,
+    Json(updates): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    use identity_did::DID;
+    
+    // Valider le format DID
+    if let Err(e) = identity_did::CoreDID::parse(&did_string) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid DID format: {}", e)
+        })));
+    }
+    
+    let mut dids = state.dids.lock().unwrap();
+    
+    if let Some(entry) = dids.get_mut(&did_string) {
+        // Mettre à jour le document DID
+        if let Some(controller) = updates.get("controller").and_then(|v| v.as_str()) {
+            entry.document.controller = Some(controller.to_string());
+        }
+        
+        if let Some(_verification_methods) = updates.get("verification_methods") {
+            // Ici tu pourrais ajouter une logique plus complexe pour mettre à jour les méthodes
+            info!("Updating verification methods for DID: {}", did_string);
+        }
+        
+        // Mettre à jour le timestamp
+        entry.document.updated = chrono::Utc::now().to_rfc3339();
+        
+        (StatusCode::OK, Json(serde_json::json!({
+            "message": format!("DID '{}' updated", did_string),
+            "did_document": entry.document
+        })))
+    } else {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": format!("DID '{}' not found", did_string)
+        })))
+    }
+}
+
+async fn get_did_document(
+    AxumState(state): AxumState<AppState>,
+    Path(did_string): Path<String>,
+) -> impl IntoResponse {
+    use identity_did::DID;
+    
+    // Valider le format DID
+    if let Err(e) = identity_did::CoreDID::parse(&did_string) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("Invalid DID format: {}", e)
+        })));
+    }
+    
+    let dids = state.dids.lock().unwrap();
+    
+    match dids.get(&did_string) {
+        Some(entry) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "@context": "https://www.w3.org/ns/did/v1",
+                "id": entry.document.id,
+                "controller": entry.document.controller,
+                "verificationMethod": entry.document.verification_methods,
+                "authentication": entry.document.authentication,
+                "created": entry.document.created,
+                "updated": entry.document.updated
+            })))
+        }
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": format!("DID '{}' not found", did_string)
+        }))),
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -492,15 +967,18 @@ async fn main() {
     let state = AppState {
         signatures: Arc::new(Mutex::new(HashMap::new())),
         kem_keys: Arc::new(Mutex::new(HashMap::new())),
+        challenges: Arc::new(Mutex::new(HashMap::new())),
+        dids: Arc::new(Mutex::new(HashMap::new())),    
     };
     
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin(Any)  // ← Permet toutes les origines
         .allow_methods(Any)
         .allow_headers(Any);
     
     let app = Router::new()
         .route("/health", get(health))
+        .route("/challenge", post(generate_challenge)) 
         .route("/keys/generate", post(generate_keys))
         .route("/sign", post(sign_document))
         .route("/verify", post(verify_signature))
@@ -513,10 +991,18 @@ async fn main() {
         .route("/kem/decapsulate", post(kem_decapsulate))
         .route("/kem/encrypt", post(kem_encrypt))
         .route("/kem/decrypt", post(kem_decrypt))
+        .route("/did/create", post(create_did))
+        .route("/did/validate/:did", get(validate_did))
+        .route("/did/resolve/:did", get(resolve_did))
+        .route("/did/list", get(list_dids))
+        .route("/did/from-key/:key_id", post(create_did_from_key))
+        .route("/did/:did", delete(delete_did))
+        .route("/did/:did", get(get_did_document))
+        .route("/did/:did", put(update_did_document))
         .layer(cors)
         .with_state(state);
     
-    let addr = "0.0.0.0:8080";
+    let addr = "0.0.0.0:8083";
     info!("🌐 Listening on http://{}", addr);
     
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

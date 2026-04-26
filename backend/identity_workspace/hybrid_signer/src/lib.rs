@@ -1,11 +1,10 @@
 //! Hybrid Signer with Weak Non-Separability (WNS) - Production Ready
 //!
-//! Implements composite signatures combining ML-DSA-65 (post-quantum) and Ed25519 (classical)
+//! Implements composite signatures combining ML-DSA-65 (post-quantum) and   (classical)
 //! with strong cryptographic binding (WNS) to prevent stripping attacks.
 
 use pqc_ml_dsa::PqcSigner;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature as Ed25519Signature};
-use ed25519_dalek::{Signer, Verifier};
+use ed25519_dalek::{SigningKey, VerifyingKey, Signature as Ed25519Signature, Signer, Verifier};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Serialize, Deserialize};

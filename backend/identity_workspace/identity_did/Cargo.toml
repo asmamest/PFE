@@ -4,5 +4,23 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-identity_core = { path = "../identity_core" }
-serde = { workspace = true }
+did_url_parser = { version = "0.3.0", features = ["std", "serde"] }
+form_urlencoded = { version = "1.2.0", default-features = false, features = ["alloc"] }
+identity_core = { path = "../identity_core", default-features = false }
+identity_jose = { path = "../identity_jose" }
+serde.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = { version = "1.0" }
+serde_json.workspace = true
+
+[package.metadata.docs.rs]
+# To build locally:
+# RUSTDOCFLAGS="--cfg docsrs" cargo +nightly doc --all-features --no-deps --workspace --open
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+# [lints]
+# workspace = true

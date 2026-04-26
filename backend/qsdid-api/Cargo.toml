@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 # Ton module hybride
 hybrid_signer = { path = "../identity_workspace/hybrid_signer" }
+identity_did = { path = "../identity_workspace/identity_did" }
 
 # Web framework
 axum = "0.7"
@@ -23,7 +24,7 @@ base64 = "0.21"
 hex = "0.4"
 chrono = "0.4"
 uuid = { version = "1.0", features = ["v4", "serde"] }
-
+rand = "0.10.1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
