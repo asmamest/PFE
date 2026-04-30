@@ -1,5 +1,4 @@
-// Copyright 2020-2024 IOTA Stiftung
-// SPDX-License-Identifier: Apache-2.0
+   
 
 use std::fmt::Debug;
 use std::fmt::Display;

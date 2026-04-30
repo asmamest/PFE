@@ -1,6 +1,4 @@
-// Copyright 2020-2023 IOTA Stiftung
-// SPDX-License-Identifier: Apache-2.0
-[
+ [
   // https://tools.ietf.org/html/rfc7515#appendix-A.1
   TestVector {
     // This test vector is NOT deterministic because the encoded token has

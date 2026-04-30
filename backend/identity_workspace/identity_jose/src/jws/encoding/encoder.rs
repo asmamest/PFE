@@ -1,6 +1,4 @@
-// Copyright 2020-2023 IOTA Stiftung
-// SPDX-License-Identifier: Apache-2.0
-
+ 
 use self::encoder_state::ReadyState;
 use self::encoder_state::RecipientProcessingState;
 

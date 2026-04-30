@@ -215,6 +215,49 @@ impl HybridSigner {
     pub fn key_id(&self) -> &str {
         &self.key_id
     }
+
+    /// Reconstruct a signer from a key pair (secret keys + public keys)
+    pub fn from_key_pair(key_pair: &HybridKeyPair) -> Result<Self> {
+        let pq_signer = PqcSigner::from_secret_key(key_pair.pq_secret_key.clone(), key_pair.pq_public_key.clone())
+            .map_err(|e| anyhow::anyhow!("Failed to load PQ signer: {}", e))?;
+        let classical_signer = SigningKey::from_bytes(key_pair.classical_secret_key.as_slice().try_into()
+            .map_err(|_| anyhow::anyhow!("Invalid classical secret key length"))?);
+        let classical_verifying_key = classical_signer.verifying_key();
+        Ok(Self {
+            pq_signer,
+            classical_signer,
+            classical_verifying_key,
+            key_id: key_pair.key_id.clone(),
+        })
+    }
+
+    pub fn from_private_keys_hex(pq_secret_hex: &str, classical_secret_hex: &str) -> Result<Self> {
+        let pq_secret_bytes = hex::decode(pq_secret_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid PQ secret hex: {}", e))?;
+        let classical_secret_bytes = hex::decode(classical_secret_hex)
+            .map_err(|e| anyhow::anyhow!("Invalid classical secret hex: {}", e))?;
+        
+        // Reconstruire le signeur PQ
+        let pq_signer = PqcSigner::from_secret_key(pq_secret_bytes, vec![])
+            .map_err(|e| anyhow::anyhow!("PQ signer error: {}", e))?;
+        
+        // Reconstruire le signeur classique
+        let classical_signer = SigningKey::from_bytes(
+            classical_secret_bytes.as_slice().try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid classical secret key length"))?
+        );
+        let classical_verifying_key = classical_signer.verifying_key();
+        
+        let key_id = Self::generate_key_id(&pq_signer, &classical_verifying_key);
+        
+        Ok(Self {
+            pq_signer,
+            classical_signer,
+            classical_verifying_key,
+            key_id,
+        })
+    }
+
 }
 
 // ============================================================================

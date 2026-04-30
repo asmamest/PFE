@@ -1,6 +1,4 @@
-// Copyright 2020-2023 IOTA Stiftung
-// SPDX-License-Identifier: Apache-2.0
-
+ 
 /// The serialization format used for the JWS.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum JwsFormat {

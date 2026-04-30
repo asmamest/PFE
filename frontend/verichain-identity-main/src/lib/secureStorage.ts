@@ -56,17 +56,3 @@ export async function loadEncryptedMLDSAKey(
     request.onerror = () => reject(request.error);
   });
 }
-
-/**
- * Supprime la clé chiffrée (utile pour logout ou reset).
- */
-export async function deleteEncryptedMLDSAKey(walletAddress: string): Promise<void> {
-  const db = await openDB();
-  const tx = db.transaction(STORE_NAME, "readwrite");
-  const store = tx.objectStore(STORE_NAME);
-  store.delete(`mlDsa_${walletAddress}`);
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}

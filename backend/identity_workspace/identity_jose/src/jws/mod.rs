@@ -1,6 +1,4 @@
-// Copyright 2020-2023 IOTA Stiftung
-// SPDX-License-Identifier: Apache-2.0
-
+ 
 //! JSON Web Signatures ([JWS](https://tools.ietf.org/html/rfc7515))
 //!
 //! The encoding and decoding APIs are strongly informed by the requirements of the higher level functionality

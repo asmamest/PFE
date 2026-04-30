@@ -39,25 +39,6 @@ export function ProfileSection({ walletAddress }: ProfileSectionProps) {
     setEditing(false);
     toast({ title: "Profile updated", description: "Your display name has been saved locally." });
   };
-
-  const handleDownloadKey = () => {
-    toast({
-      title: "Biometric confirmation required",
-      description: "Please confirm your identity to download the private key.",
-    });
-    // Simulate biometric delay
-    setTimeout(() => {
-      const blob = new Blob([privateKeyFull], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "qs-did-private-key.txt";
-      a.click();
-      URL.revokeObjectURL(url);
-      toast({ title: "Private key downloaded", description: "Store it securely offline." });
-    }, 1500);
-  };
-
   const infoRows = [
     {
       label: "Wallet Address",
@@ -112,28 +93,6 @@ export function ProfileSection({ walletAddress }: ProfileSectionProps) {
             </div>
           ))}
 
-          {/* Private Key */}
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-              <Key className="h-4 w-4 text-destructive" />
-              Private Key
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="inline-flex items-center gap-1.5 rounded-md bg-muted px-3 py-1.5 font-mono text-xs">
-                <span>{showPrivateKey ? privateKeyFull : `${privateKeyFull.slice(0, 6)}...${privateKeyFull.slice(-4)}`}</span>
-                <button
-                  onClick={() => setShowPrivateKey(!showPrivateKey)}
-                  className="text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showPrivateKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                </button>
-              </div>
-              <Button variant="outline" size="sm" onClick={handleDownloadKey} className="gap-1.5">
-                <Download className="h-3.5 w-3.5" />
-                Download
-              </Button>
-            </div>
-          </div>
         </CardContent>
       </Card>
 

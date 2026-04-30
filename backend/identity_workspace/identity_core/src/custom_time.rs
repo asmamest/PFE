@@ -1,5 +1,4 @@
-// Copyright 2020-2024 IOTA Stiftung
-// SPDX-License-Identifier: Apache-2.0
+   
 
 //! An implementation of `now_utc` which calls out to an externally defined function.
 use crate::common::Timestamp;

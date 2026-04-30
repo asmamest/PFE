@@ -12,7 +12,7 @@ description.workspace = true
 
 [dependencies]
 pqc_ml_dsa = { path = "../pqc_ml_dsa" }
-identity_jose = { path = "../identity_jose" }
+#identity_jose = { path = "../identity_jose" }
 
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 rand.workspace = true 

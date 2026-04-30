@@ -20,21 +20,23 @@ import { toast } from "@/hooks/use-toast";
 import logo from "@/assets/logo.png";
 
 import { useAuthMachine, type AuthState } from "@/lib/qsdid/stateMachine";
-import { audit } from "@/lib/qsdid/audit";
 import { createPasskeyWithPRF, getPRFKey, isPRFSupported } from "@/lib/webauthnPrf";
 import { encryptWithPRF } from "@/lib/cryptoWrapper";
 import { storeEncryptedMLDSAKey } from "@/lib/secureStorage";
+import { storeDIDDocument, storeInitialHolderProfile  } from "@/lib/ipfs/ipfsClient";
+import { registerUserOnChain } from "@/lib/blockchain/UserRegistryService";
+import { hexToMultibase } from "@/lib/utils/encoding";
 import {
   initWasm,
   healthCheck,
-  generateHybridKeys,
+  generateHybridKeysLocal,
   getChallenge,
   signDocumentWithChallenge,
   verifySignature,
   encodeUtf8ToB64,
   type HybridKeyPair,
 } from "@/lib/qsdid/wasmClient";
-import { createTotp, persistTotpDev, verifyTotp } from "@/lib/qsdid/totp";
+import { createTotp, verifyTotp } from "@/lib/qsdid/totp"; // ✅ Import corrigé
 
 const API_BASE = "http://localhost:8083";
 
@@ -58,7 +60,7 @@ function stateToStep(s: AuthState): StepKey {
     case "CHALLENGE_REQUESTED":
     case "CHALLENGE_RECEIVED":
     case "SIGNED":
-    case "VERIFIED": return "init"; // toutes ces étapes techniques sont invisibles
+    case "VERIFIED": return "init";
     case "WALLET_CONNECTED": return "wallet";
     case "PASSKEY_READY": return "passkey";
     case "AUTHENTICATED": return "done";
@@ -85,7 +87,7 @@ export default function Onboarding() {
 
   // Wallet
   const [walletAddr, setWalletAddr] = useState<string | null>(null);
-  const [role, setRole] = useState<"holder" | "issuer" | "verifier">("holder");
+  const [role, setRole] = useState<"holder" | "issuer" >("holder");
   const [accountType, setAccountType] = useState<"individual" | "organization">("individual");
   const did = useMemo(() => (walletAddr ? `did:zk:${walletAddr}` : null), [walletAddr]);
 
@@ -99,7 +101,7 @@ export default function Onboarding() {
     return () => { mounted = false; };
   }, []);
 
-  // Initialisation WASM + TOTP
+  // Initialisation WASM + TOTP (génération locale)
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -139,7 +141,7 @@ export default function Onboarding() {
       await healthCheck();
       send("BACKEND_OK");
       setInitProgress("Génération des clés post‑quantiques...");
-      const k = await generateHybridKeys();
+      const k = await generateHybridKeysLocal();
       setKeys(k);
       send("KEYS_GENERATED");
       setInitProgress("Signature d’un challenge de test...");
@@ -177,15 +179,50 @@ export default function Onboarding() {
     setBusy(true);
     setError(null);
     try {
-      const eth = (window as unknown as { ethereum?: { request: (a: { method: string }) => Promise<string[]> } }).ethereum;
-      if (!eth) throw new Error("MetaMask not detected");
-      const accounts = await eth.request({ method: "eth_requestAccounts" });
+      // Vérification de l'existence de MetaMask
+      const ethereum = (window as any).ethereum;
+      if (!ethereum) {
+        setError(
+          "MetaMask not detected. Please install MetaMask extension first."
+        );
+        // Ouvrir un lien d'installation dans un nouvel onglet (optionnel)
+        window.open("https://metamask.io/download/", "_blank");
+        return;
+      }
+
+      // Vérifier si le réseau est zkSync Sepolia
+      const chainId = await ethereum.request({ method: "eth_chainId" });
+      const expectedChainId = "0x12c"; // 300 en hexadécimal (0x12C)
+      if (chainId !== expectedChainId) {
+        setError("Please switch to zkSync Sepolia network in MetaMask.");
+        // Option : demander à MetaMask d'ajouter le réseau automatiquement
+        try {
+          await ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: expectedChainId,
+              chainName: "zkSync Sepolia",
+              rpcUrls: ["https://sepolia.era.zksync.dev"],
+              nativeCurrency: { name: "Ethereum", symbol: "ETH", decimals: 18 },
+              blockExplorerUrls: ["https://sepolia.explorer.zksync.io"]
+            }]
+          });
+        } catch (addError) {
+          console.error("Failed to add network:", addError);
+        }
+        return;
+      }
+
+      // Demander l'autorisation d'accéder aux comptes
+      const accounts = await ethereum.request({ method: "eth_requestAccounts" });
       const addr = accounts?.[0];
       if (!addr) throw new Error("No account returned");
       setWalletAddr(addr);
       send("WALLET_DONE");
     } catch (e) {
-      setError(`Wallet connection failed: ${(e as Error).message}`);
+      const errorMsg = (e as Error).message;
+      setError(`Wallet connection failed: ${errorMsg}`);
+      console.error(e);
     } finally {
       setBusy(false);
     }
@@ -200,14 +237,27 @@ export default function Onboarding() {
     setError(null);
     try {
       if (!prfSupported) throw new Error("PRF non supporté.");
-      const { credentialId } = await createPasskeyWithPRF(walletAddr, `issuer_${walletAddr.slice(0, 8)}`);
+      const { credentialId } = await createPasskeyWithPRF(walletAddr, `holder_${walletAddr.slice(0, 8)}`);
       const prfKey = await getPRFKey(credentialId);
       if (!(prfKey instanceof CryptoKey)) throw new Error("Clé PRF invalide");
-      const { ciphertext, iv } = await encryptWithPRF(prfKey, keys.private_key);
+
+      // 🧠 Sérialiser les deux clés privées en JSON
+      const privateKeyBundle = {
+        pq_secret: keys.pq_secret_key,
+        classical_secret: keys.classical_secret_key,
+      };
+      const plaintext = JSON.stringify(privateKeyBundle);
+      const { ciphertext, iv } = await encryptWithPRF(prfKey, plaintext);
       await storeEncryptedMLDSAKey(walletAddr, { ciphertext, iv, credentialId });
-      setKeys(prev => prev ? { ...prev, private_key: "***ENCRYPTED***" } : null);
+
+      // Optionnel : masquer les secrets dans l'état
+      setKeys(prev => prev ? { 
+        ...prev, 
+        pq_secret_key: "***ENCRYPTED***",
+        classical_secret_key: "***ENCRYPTED***" 
+      } : null);
       send("PASSKEY_DONE");
-      toast({ title: "Passkey créée", description: "Clé ML-DSA protégée par biométrie." });
+      toast({ title: "Passkey créée", description: "Clés hybrides protégées par biométrie." });
     } catch (err: any) {
       console.error(err);
       setError(`Échec création passkey : ${err.message}`);
@@ -216,28 +266,71 @@ export default function Onboarding() {
     }
   }, [keys, walletAddr, prfSupported, send]);
 
-  const finalize = useCallback(() => {
-    if (!walletAddr || !keys || !totpSecret || !did) return;
-    persistTotpDev(did, totpSecret);
-    const identity = {
-      did,
-      walletAddress: walletAddr,
-      totpRef: did,
-      publicKey: keys.public_key,
-      role,
-      accountType,
-      createdAt: Date.now(),
-    };
-    sessionStorage.setItem("qsdid.identity", JSON.stringify(identity));
-    send("ACCESS_GRANTED");
-    toast({ title: "Identity anchored", description: did });
-    if (role === "holder") {
-      navigate("/holder");
-    } else {
-      const params = new URLSearchParams({ role, type: accountType, wallet: walletAddr });
-      navigate(`/registration?${params.toString()}`);
+  const storeTotpSecretOnBackend = useCallback(async (userId: string, secret: string) => {
+    const res = await fetch('http://localhost:8083/api/totp/store', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, secret }),
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to store TOTP secret');
     }
-  }, [walletAddr, keys, totpSecret, did, role, accountType, send, navigate]);
+  }, []);
+
+
+  const finalize = useCallback(async () => {
+    if (!walletAddr || !keys || !totpSecret) {
+      setError("Wallet, clés ou TOTP manquant");
+      return;
+    }
+
+    const publicKeyHex = keys.pq_public_key as string;
+    if (!publicKeyHex || typeof publicKeyHex !== 'string') {
+      console.error("Objet keys reçu :", keys);
+      setError("Clé ML-DSA introuvable ou invalide – veuillez recommencer l'étape de génération");
+      return;
+    }
+
+    setBusy(true);
+    setError(null);
+
+    try {
+      const fullDid = `did:zk:${walletAddr}`;
+      const multibaseKey = hexToMultibase(publicKeyHex);
+
+      // 1. Stocker le profil/DID sur IPFS, selon le rôle
+      let cid: string;
+      if (role === "holder") {
+        cid = await storeInitialHolderProfile(fullDid, multibaseKey);
+      } else {
+        cid = await storeDIDDocument(fullDid, multibaseKey);
+      }
+
+      // 2. Enregistrement sur blockchain (zkSync Sepolia)
+      await registerUserOnChain(publicKeyHex, cid, role);
+
+      // 3. Sauvegarder le secret TOTP dans le backend (associé au DID)
+      await storeTotpSecretOnBackend(fullDid, totpSecret);
+
+      // 4. Plus de sessionStorage – l'identité sera reconstruite depuis la blockchain
+
+      toast({ title: "Identité ancrée sur blockchain", description: fullDid });
+
+      // Redirection
+      if (role === "holder") {
+        navigate(`/registration?role=holder&wallet=${walletAddr}`);
+      } else {
+        navigate(`/registration?role=${role}&type=${accountType}&wallet=${walletAddr}`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setError(`Finalisation échouée : ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [walletAddr, keys, totpSecret, role, accountType, navigate, storeTotpSecretOnBackend]);
+
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-8 sm:px-6">
@@ -327,7 +420,7 @@ export default function Onboarding() {
                   <div className="mt-4">
                     <div className="text-[10px] font-semibold uppercase text-muted-foreground">Role</div>
                     <div className="mt-2 grid grid-cols-3 gap-2">
-                      {(["holder", "issuer", "verifier"] as const).map(r => (
+                      {(["holder", "issuer"] as const).map(r => (
                         <button key={r} onClick={() => setRole(r)} className={`rounded-md border px-2 py-2 text-[11px] capitalize ${role === r ? "border-primary bg-primary/10 text-primary" : "border-border bg-secondary/30"}`}>{r}</button>
                       ))}
                     </div>

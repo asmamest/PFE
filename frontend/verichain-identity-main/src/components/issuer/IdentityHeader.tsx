@@ -7,7 +7,7 @@ interface IdentityHeaderProps {
   walletAddress: string;
   did: string;
   publicKey: string;
-  role: "issuer" | "verifier" | "holder";
+  role: "issuer" | "holder";
   registeredAt: number;
 }
 

@@ -3,6 +3,9 @@ use wasm_bindgen_futures::JsFuture;
 use reqwest::Client;
 use serde_json::json;
 use std::cell::RefCell;
+use hex;
+use hybrid_signer::{HybridSigner, CompositeSignature};
+use base64::engine::general_purpose::STANDARD as BASE64;
 
 // Configuration globale de l'API
 thread_local! {
@@ -21,6 +24,45 @@ pub fn set_api_base_url(url: &str) {
     API_BASE_URL.with(|base| {
         *base.borrow_mut() = url.to_string();
     });
+}
+
+#[wasm_bindgen]
+pub fn sign_with_private_key_hex(
+    document_b64: &str,
+    pq_secret_hex: &str,
+    classical_secret_hex: &str,
+) -> Result<JsValue, JsValue> {
+    // 1. Décoder le document
+    let doc_bytes = base64::engine::general_purpose::STANDARD
+        .decode(document_b64)
+        .map_err(|e| JsValue::from_str(&format!("Invalid base64: {}", e)))?;
+    
+    // 2. Reconstruire le signeur
+    let signer = HybridSigner::from_private_keys_hex(pq_secret_hex, classical_secret_hex)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    // 3. Signer
+    let signature = signer.sign_composite(&doc_bytes)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    // 4. Sérialiser la signature en JSON
+    let sig_json = signature.to_json()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    
+    // 5. Générer un ID (optionnel)
+    let signature_id = format!("sig_{}", uuid::Uuid::new_v4().simple());
+    
+    let result = json!({
+        "signature_id": signature_id,
+        "signature_json": sig_json,
+        "document_hash": hex::encode(&signature.document_hash),
+        "signature_size": signature.pq_signature.len() + signature.classical_signature.len(),
+        "algorithms": vec!["ML-DSA-65", "Ed25519"],
+        "timestamp": signature.timestamp,
+    });
+    
+    serde_wasm_bindgen::to_value(&result)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 fn get_api_base_url() -> String {
@@ -140,6 +182,21 @@ pub async fn delete_signature(signature_id: &str) -> Result<JsValue, JsValue> {
     Ok(json)
 }
 
+#[wasm_bindgen]
+pub fn generate_hybrid_keys_local() -> Result<JsValue, JsValue> {
+    use hybrid_signer::HybridSigner;
+    let signer = HybridSigner::generate()
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let key_pair = signer.get_key_pair();
+    let result = serde_json::json!({
+        "pq_public_key": hex::encode(&key_pair.pq_public_key),
+        "pq_secret_key": hex::encode(&key_pair.pq_secret_key),
+        "classical_public_key": hex::encode(&key_pair.classical_public_key),
+        "classical_secret_key": hex::encode(&key_pair.classical_secret_key),
+        "key_id": key_pair.key_id,
+    });
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
+}
 // ============================================================================
 // KEM (ML-KEM-768)
 // ============================================================================

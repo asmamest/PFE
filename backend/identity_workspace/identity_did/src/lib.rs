@@ -1,6 +1,6 @@
 
 
-//! DID (Decentralized Identifier) implementation for the IOTA Identity framework.
+//! DID (Decentralized Identifier) implementation.
 mod did;
 mod did_url;
 mod error;

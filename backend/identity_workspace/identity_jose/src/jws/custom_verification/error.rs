@@ -1,6 +1,4 @@
-// Copyright 2020-2023 IOTA Stiftung
-// SPDX-License-Identifier: Apache-2.0
-
+ 
 use std::fmt::Display;
 
 /// Error type for a failed jws signature verification. See [`JwsVerifier`](super::JwsVerifier).

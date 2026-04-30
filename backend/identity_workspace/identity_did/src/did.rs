@@ -32,7 +32,6 @@ pub trait DID:
   ///
   /// E.g.
   /// - `"did:example:12345678" -> "did"`
-  /// - `"did:iota:main:12345678" -> "did"`
   fn scheme(&self) -> &'static str {
     self.as_ref().0.scheme()
   }
@@ -41,7 +40,6 @@ pub trait DID:
   ///
   /// E.g.
   /// - `"did:example:12345678" -> "example:12345678"`
-  /// - `"did:iota:main:12345678" -> "iota:main:12345678"`
   fn authority(&self) -> &str {
     self.as_ref().0.authority()
   }
@@ -50,7 +48,6 @@ pub trait DID:
   ///
   /// E.g.
   /// - `"did:example:12345678" -> "example"`
-  /// - `"did:iota:main:12345678" -> "iota"`
   fn method(&self) -> &str {
     self.as_ref().0.method()
   }
@@ -59,7 +56,6 @@ pub trait DID:
   ///
   /// E.g.
   /// - `"did:example:12345678" -> "12345678"`
-  /// - `"did:iota:main:12345678" -> "main:12345678"`
   fn method_id(&self) -> &str {
     self.as_ref().0.method_id()
   }

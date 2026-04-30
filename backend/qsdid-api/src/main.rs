@@ -11,6 +11,11 @@ use axum::{
     http::StatusCode,
     Router, routing::{get, post, put, delete},
 };
+
+use axum::extract::State;
+use serde_json::json;
+use rand::Rng;
+
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -22,7 +27,13 @@ use base64::Engine;
 use hybrid_signer::{HybridSigner, HybridVerifier, CompositeSignature, CustomCompositeJwk};
 use pqc_ml_kem::{MlKem768, EncryptedMessage, KeyPair as KemKeyPair};
 use identity_did::{CoreDID, DID};
+use totp_rs::{TOTP, Algorithm, Secret};
 
+#[derive(Debug, Deserialize)]
+struct PrivateKeyData {
+    pq_secret: String,
+    classical_secret: String,
+}
 // ============================================================================
 // Application State
 // ============================================================================
@@ -33,6 +44,7 @@ struct AppState {
     kem_keys: Arc<Mutex<HashMap<String, KemKeyPair>>>,
     challenges: Arc<Mutex<HashMap<String, ChallengeEntry>>>,
     dids: Arc<Mutex<HashMap<String, DIDEntry>>>,
+    totp_secrets: Arc<Mutex<HashMap<String, String>>>, 
 }
 
 #[derive(Clone)]
@@ -59,9 +71,10 @@ struct ChallengeEntry {
 
 #[derive(Debug, Deserialize)]
 struct SignRequest {
-    document: String,  // Base64 encoded document
+    document: String,
     document_name: Option<String>,
     challenge_id: Option<String>,
+    private_key: Option<PrivateKeyData>,   // <-- NOUVEAU CHAMP
 }
 
 #[derive(Debug, Serialize)]
@@ -261,13 +274,17 @@ async fn sign_document(
     };
 
     // ... tout le code existant de signature ...
-    let signer = match HybridSigner::generate() {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": format!("Signer failed: {}", e)
-        }))),
+    let signer = if let Some(pk) = req.private_key {
+        match HybridSigner::from_private_keys_hex(&pk.pq_secret, &pk.classical_secret) {
+            Ok(s) => s,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))),
+        }
+    } else {
+        match HybridSigner::generate() {
+            Ok(s) => s,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
+        }
     };
-
     let public_key_jwk = signer.export_composite_jwk();
 
     let signature = match signer.sign_composite(&document_bytes) {
@@ -952,6 +969,122 @@ async fn get_did_document(
     }
 }
 
+
+
+// ------------------------------------------------------------------------
+// TOTP handlers (Google Authenticator)
+// ------------------------------------------------------------------------
+
+// ------------------------------------------------------------------------
+// TOTP handlers (Google Authenticator)
+// ------------------------------------------------------------------------
+
+// ------------------------------------------------------------------------
+// TOTP handlers (Google Authenticator)
+// ------------------------------------------------------------------------
+
+async fn totp_setup(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = req
+        .get("userId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if user_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "userId required" })));
+    }
+
+    // Générer 20 octets aléatoires
+    let secret_bytes: [u8; 20] = rand::random();
+    let secret_base32 = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &secret_bytes);
+
+    // Construire l'URI otpauth
+    let otpauth_url = format!(
+        "otpauth://totp/QS-DID:{}?secret={}&issuer=QS-DID&algorithm=SHA1&digits=6&period=30",
+        user_id, secret_base32
+    );
+
+    // Stocker le secret (base32)
+    {
+        let mut totp_secrets = state.totp_secrets.lock().unwrap();
+        totp_secrets.insert(user_id, secret_base32.clone());
+    }
+
+    (StatusCode::OK, Json(json!({
+        "otpauthUrl": otpauth_url,
+        "secret": secret_base32,
+    })))
+}
+
+async fn totp_verify(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = req
+        .get("userId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let token = req
+        .get("token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if user_id.is_empty() || token.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "userId and token required" })));
+    }
+
+    let secret_base32 = {
+        let totp_secrets = state.totp_secrets.lock().unwrap();
+        totp_secrets.get(&user_id).cloned()
+    };
+    let secret_base32 = match secret_base32 {
+        Some(s) => s,
+        None => return (StatusCode::NOT_FOUND, Json(json!({ "error": "TOTP not set up" }))),
+    };
+
+    let secret_bytes = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &secret_base32)
+        .unwrap_or(vec![]);
+    if secret_bytes.is_empty() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "Invalid secret" })));
+    }
+
+    let totp = TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        secret_bytes,
+    )
+    .unwrap();
+
+    let verified = totp.check_current(&token).unwrap_or(false);
+
+    if verified {
+        (StatusCode::OK, Json(json!({ "success": true })))
+    } else {
+        (StatusCode::UNAUTHORIZED, Json(json!({ "error": "Invalid TOTP code" })))
+    }
+}
+
+async fn totp_store(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let user_id = req.get("userId").and_then(|v| v.as_str()).unwrap_or("");
+    let secret = req.get("secret").and_then(|v| v.as_str()).unwrap_or("");
+    if user_id.is_empty() || secret.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "userId and secret required" })));
+    }
+    {
+        let mut totp_secrets = state.totp_secrets.lock().unwrap();
+        totp_secrets.insert(user_id.to_string(), secret.to_string());
+    }
+    (StatusCode::OK, Json(json!({ "success": true })))
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -968,7 +1101,8 @@ async fn main() {
         signatures: Arc::new(Mutex::new(HashMap::new())),
         kem_keys: Arc::new(Mutex::new(HashMap::new())),
         challenges: Arc::new(Mutex::new(HashMap::new())),
-        dids: Arc::new(Mutex::new(HashMap::new())),    
+        dids: Arc::new(Mutex::new(HashMap::new())),
+        totp_secrets: Arc::new(Mutex::new(HashMap::new())),    
     };
     
     let cors = CorsLayer::new()
@@ -999,6 +1133,10 @@ async fn main() {
         .route("/did/:did", delete(delete_did))
         .route("/did/:did", get(get_did_document))
         .route("/did/:did", put(update_did_document))
+        .route("/api/totp/setup", post(totp_setup))
+        .route("/api/totp/verify", post(totp_verify))
+        .route("/api/totp/store", post(totp_store))
+
         .layer(cors)
         .with_state(state);
     

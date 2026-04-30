@@ -10,8 +10,12 @@ import Registration from "./pages/Registration";
 import RoleSelection from "./pages/RoleSelection.tsx";
 import HolderDashboard from "./pages/HolderDashboard.tsx";
 import IssuerDashboard from "./pages/issuer/Dashboard.tsx";
-import VerifierDashboard from "./pages/VerifierDashboard.tsx";
 import NotFound from "./pages/NotFound.tsx";
+import HolderCredentials from "./pages/HolderCredentials";
+import HolderProfile from "./pages/HolderProfile";
+import HolderRequest from "./pages/HolderRequest";
+import HolderUpload from "./pages/HolderUpload";
+import HolderNotifications from "./pages/HolderNotifications";
 
 const queryClient = new QueryClient();
 
@@ -29,7 +33,11 @@ const App = () => (
           <Route path="/registration" element={<Registration />} />
           <Route path="/holder" element={<HolderDashboard />} />
           <Route path="/issuer/dashboard" element={<IssuerDashboard />} />
-          <Route path="/verifier" element={<VerifierDashboard />} />
+          <Route path="/holder/credentials" element={<HolderCredentials />} />
+          <Route path="/holder/profile" element={<HolderProfile />} />
+          <Route path="/holder/request" element={<HolderRequest />} />
+          <Route path="/holder/upload" element={<HolderUpload />} />
+          <Route path="/holder/notifications" element={<HolderNotifications />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>

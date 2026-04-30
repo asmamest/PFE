@@ -7,13 +7,12 @@ import { Button } from "@/components/ui/button";
 import { audit } from "@/lib/qsdid/audit";
 import logo from "@/assets/logo.png";
 
-type Role = "holder" | "issuer" | "verifier";
+type Role = "holder" | "issuer";
 type AccountType = "individual" | "organization";
 
 const roles: { key: Role; title: string; desc: string; icon: React.ReactNode }[] = [
   { key: "holder", title: "Holder", desc: "Receive and present verifiable credentials.", icon: <UserCircle2 className="h-5 w-5" /> },
   { key: "issuer", title: "Issuer", desc: "Issue signed credentials to holders.", icon: <FileSignature className="h-5 w-5" /> },
-  { key: "verifier", title: "Verifier", desc: "Request and verify presentations.", icon: <ScanLine className="h-5 w-5" /> },
 ];
 
 export default function RoleSelection() {

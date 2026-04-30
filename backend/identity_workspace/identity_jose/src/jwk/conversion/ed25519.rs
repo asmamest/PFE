@@ -1,6 +1,4 @@
-// Copyright 2020-2023 IOTA Stiftung
-// SPDX-License-Identifier: Apache-2.0
-
+ 
 use fastcrypto::ed25519::Ed25519KeyPair;
 use fastcrypto::ed25519::Ed25519PrivateKey;
 use fastcrypto::ed25519::Ed25519PublicKey;

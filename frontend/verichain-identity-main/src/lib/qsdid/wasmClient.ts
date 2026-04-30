@@ -19,9 +19,17 @@ let ready = false;
 let backendReady = false;
 let currentApiBaseUrl = DEFAULT_API_BASE; // Ajouté
 
+// wasmClient.ts
 export interface HybridKeyPair {
-  public_key: string;
-  private_key: string;
+  // Pour generateHybridKeys() (ancien backend)
+  public_key?: string;
+  private_key?: string;
+  // Pour generateHybridKeysLocal()
+  pq_public_key?: string;
+  pq_secret_key?: string;
+  classical_public_key?: string;
+  classical_secret_key?: string;
+  key_id?: string;
   [k: string]: unknown;
 }
 
@@ -138,6 +146,21 @@ export async function getChallenge(context: string): Promise<Challenge> {
   const challenge = await response.json();
   audit("SUCCESS", "Challenge received", { challenge_id: challenge.challenge_id });
   return challenge;
+}
+
+export async function signWithPrivateKeyHex(
+  documentB64: string,
+  pqSecretHex: string,
+  classicalSecretHex: string
+): Promise<SignatureResult> {
+  ensureReady();
+  const result = await qs.sign_with_private_key_hex(documentB64, pqSecretHex, classicalSecretHex);
+  return result as SignatureResult;
+}
+
+export async function generateHybridKeysLocal(): Promise<any> {
+  ensureReady();
+  return await qs.generate_hybrid_keys_local();
 }
 
 /** Signer un document avec l'ID de challenge (NOUVELLE FONCTION) */
