@@ -15,7 +15,8 @@ use axum::{
 use axum::extract::State;
 use serde_json::json;
 use rand::Rng;
-
+use axum::extract::Query;
+use chrono::Utc;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -23,17 +24,23 @@ use uuid::Uuid;
 use tracing::{info};
 use tower_http::cors::{CorsLayer, Any};
 use base64::Engine;
+use hybrid_signer::{HybridSigner, HybridVerifier, CompositeSignature, CustomCompositeJwk, HybridKeyPair};
 
-use hybrid_signer::{HybridSigner, HybridVerifier, CompositeSignature, CustomCompositeJwk};
 use pqc_ml_kem::{MlKem768, EncryptedMessage, KeyPair as KemKeyPair};
 use identity_did::{CoreDID, DID};
 use totp_rs::{TOTP, Algorithm, Secret};
 
+
+use std::fs;
+use std::path::Path as StdPath;
 #[derive(Debug, Deserialize)]
 struct PrivateKeyData {
     pq_secret: String,
     classical_secret: String,
+    pq_public: String,        // hex
+    classical_public: String, // hex
 }
+
 // ============================================================================
 // Application State
 // ============================================================================
@@ -44,7 +51,10 @@ struct AppState {
     kem_keys: Arc<Mutex<HashMap<String, KemKeyPair>>>,
     challenges: Arc<Mutex<HashMap<String, ChallengeEntry>>>,
     dids: Arc<Mutex<HashMap<String, DIDEntry>>>,
-    totp_secrets: Arc<Mutex<HashMap<String, String>>>, 
+    totp_secrets: Arc<Mutex<HashMap<String, String>>>,
+    issuers: Arc<Mutex<Vec<IssuerInfo>>>, 
+    credential_requests: Arc<Mutex<HashMap<String, CredentialRequest>>>,
+
 }
 
 #[derive(Clone)]
@@ -63,6 +73,42 @@ struct ChallengeEntry {
     nonce: String,
     expires_at: i64,
     used: bool,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRequest {
+    pub id: String,
+    pub holder: String,
+    pub issuer: String,
+    pub credential_type: String,
+    pub message: String,
+    pub status: String,
+    pub requested_at: i64,
+    pub credential_id: Option<String>,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssuerInfo {
+    pub address: String,
+    pub legal_name: String,
+    pub credential_types: Vec<String>,
+}
+
+const ISSUERS_FILE: &str = "issuers.json";
+
+fn load_issuers() -> Vec<IssuerInfo> {
+    if !StdPath::new(ISSUERS_FILE).exists() {
+        return Vec::new();
+    }
+    let data = fs::read_to_string(ISSUERS_FILE).unwrap_or_default();
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn save_issuers(issuers: &[IssuerInfo]) {
+    let data = serde_json::to_string_pretty(issuers).unwrap();
+    fs::write(ISSUERS_FILE, data).unwrap();
 }
 
 // ============================================================================
@@ -197,6 +243,8 @@ async fn generate_keys() -> impl IntoResponse {
                 "key_id": key_id,
                 "pq_public_key": hex::encode(&key_pair.pq_public_key),
                 "classical_public_key": hex::encode(&key_pair.classical_public_key),
+                "pq_secret_key": hex::encode(&key_pair.pq_secret_key), // Ajouté
+                "classical_secret_key": hex::encode(&key_pair.classical_secret_key), // Ajouté
                 "pq_public_key_size": key_pair.pq_public_key.len(),
                 "classical_public_key_size": key_pair.classical_public_key.len(),
                 "composite_jwk": composite_jwk,
@@ -208,74 +256,75 @@ async fn generate_keys() -> impl IntoResponse {
     }
 }
 
+
 async fn sign_document(
     state: axum::extract::State<AppState>,
     Json(req): Json<SignRequest>,
 ) -> impl IntoResponse {
     let start = std::time::Instant::now();
 
-    // ===== VÉRIFICATION DU CHALLENGE (AJOUTER CETTE SECTION) =====
+    // Vérification du challenge (inchangée)
     if let Some(challenge_id) = &req.challenge_id {
         let mut challenges = state.challenges.lock().unwrap();
-        
         if let Some(challenge) = challenges.get_mut(challenge_id) {
             let now = chrono::Utc::now().timestamp();
-            
             if now > challenge.expires_at {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                    "error": "Challenge expired"
-                })));
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Challenge expired" })));
             }
-            
             if challenge.used {
-                return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                    "error": "Challenge already used"
-                })));
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Challenge already used" })));
             }
-            
-            // Décoder le document pour vérifier le nonce
             let document_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
                 Ok(d) => d,
-                Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                    "error": format!("Invalid base64: {}", e)
-                }))),
+                Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Invalid base64: {}", e) }))),
             };
-            
-            // Essayer de parser le JSON pour vérifier le nonce
             if let Ok(doc_str) = String::from_utf8(document_bytes.clone()) {
                 if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&doc_str) {
                     let nonce_in_doc = json_value.get("nonce").and_then(|v| v.as_str());
-                    
                     if nonce_in_doc != Some(&challenge.nonce) {
-                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                            "error": "Nonce mismatch"
-                        })));
+                        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Nonce mismatch" })));
                     }
                 }
             }
-            
-            // Marquer le challenge comme utilisé
             challenge.used = true;
             info!("Challenge '{}' verified and marked as used", challenge_id);
         } else {
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": format!("Challenge '{}' not found", challenge_id)
-            })));
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Challenge '{}' not found", challenge_id) })));
         }
     }
-    // ===== FIN DE LA VÉRIFICATION =====
 
-    // Le reste du code de signature reste identique...
     let document_bytes = match base64::engine::general_purpose::STANDARD.decode(&req.document) {
         Ok(d) => d,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": format!("Invalid base64: {}", e)
-        }))),
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Invalid base64: {}", e) }))),
     };
 
-    // ... tout le code existant de signature ...
+    // Création du signeur (corrigée, sans `?`)
     let signer = if let Some(pk) = req.private_key {
-        match HybridSigner::from_private_keys_hex(&pk.pq_secret, &pk.classical_secret) {
+        let pq_secret = match hex::decode(&pk.pq_secret) {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Invalid pq_secret: {}", e) }))),
+        };
+        let classical_secret = match hex::decode(&pk.classical_secret) {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Invalid classical_secret: {}", e) }))),
+        };
+        let pq_public = match hex::decode(&pk.pq_public) {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Invalid pq_public: {}", e) }))),
+        };
+        let classical_public = match hex::decode(&pk.classical_public) {
+            Ok(v) => v,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("Invalid classical_public: {}", e) }))),
+        };
+        let key_pair = HybridKeyPair {
+            pq_public_key: pq_public,
+            pq_secret_key: pq_secret,
+            classical_public_key: classical_public,
+            classical_secret_key: classical_secret,
+            key_id: String::new(),
+            created_at: 0,
+        };
+        match HybridSigner::from_key_pair(&key_pair) {
             Ok(s) => s,
             Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))),
         }
@@ -285,20 +334,17 @@ async fn sign_document(
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))),
         }
     };
+
     let public_key_jwk = signer.export_composite_jwk();
 
     let signature = match signer.sign_composite(&document_bytes) {
         Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": format!("Signing failed: {}", e)
-        }))),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("Signing failed: {}", e) }))),
     };
 
     let signature_json = match signature.to_json() {
         Ok(j) => j,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": format!("Serialization failed: {}", e)
-        }))),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("Serialization failed: {}", e) }))),
     };
 
     let signature_id = format!("sig_{}", Uuid::new_v4().simple());
@@ -320,7 +366,7 @@ async fn sign_document(
     let elapsed = start.elapsed();
     info!("Signed document '{}' in {:?}", signature_id, elapsed);
 
-    (StatusCode::CREATED, Json(serde_json::json!({
+    (StatusCode::CREATED, Json(json!({
         "signature_id": signature_id,
         "signature_json": signature_json,
         "document_hash": document_hash_hex,
@@ -330,7 +376,6 @@ async fn sign_document(
         "signing_time_ms": elapsed.as_millis(),
     })))
 }
-
 
 
 async fn verify_signature(
@@ -975,9 +1020,113 @@ async fn get_did_document(
 // TOTP handlers (Google Authenticator)
 // ------------------------------------------------------------------------
 
-// ------------------------------------------------------------------------
-// TOTP handlers (Google Authenticator)
-// ------------------------------------------------------------------------
+async fn create_credential_request(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let holder = req.get("holder").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let issuer = req.get("issuer").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let credential_type = req.get("credentialType").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let message = req.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    if holder.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing field: holder" })));
+    }
+    if issuer.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing field: issuer" })));
+    }
+    if credential_type.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing field: credentialType" })));
+    }
+
+    if holder.is_empty() || issuer.is_empty() || credential_type.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing fields" })));
+    }
+
+    let id = Uuid::new_v4().to_string();
+    let request = CredentialRequest {
+        id: id.clone(),
+        holder,
+        issuer,
+        credential_type,
+        message,
+        status: "pending".to_string(),
+        requested_at: Utc::now().timestamp(),
+        credential_id: None,
+    };
+
+    {
+        let mut requests = state.credential_requests.lock().unwrap();
+        requests.insert(id.clone(), request);
+        save_credential_requests(&requests); // ← PERSISTANCE
+    }
+
+    (StatusCode::CREATED, Json(json!({ "id": id, "status": "pending" })))
+}
+
+
+
+
+async fn update_credential_request(
+
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let new_status = req.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let credential_id = req.get("credentialId").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    let mut requests = state.credential_requests.lock().unwrap();
+    if let Some(r) = requests.get_mut(&id) {
+        r.status = new_status.to_string();
+        if let Some(cid) = credential_id {
+            r.credential_id = Some(cid);
+        }
+        save_credential_requests(&requests); // ← PERSISTANCE
+        (StatusCode::OK, Json(json!({ "success": true })))
+    } else {
+        (StatusCode::NOT_FOUND, Json(json!({ "error": "Request not found" })))
+    }
+}
+
+// GET /issuers
+async fn list_issuers(State(state): State<AppState>) -> impl IntoResponse {
+    let issuers = state.issuers.lock().unwrap();
+    Json(json!({ "issuers": *issuers }))
+}
+
+// POST /issuers
+async fn register_issuer(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let address = req.get("address").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let legal_name = req.get("legalName").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let credential_types: Vec<String> = req.get("credentialTypes")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    if address.is_empty() || legal_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "address and legalName required" })));
+    }
+
+    let mut issuers = state.issuers.lock().unwrap();
+    // Mettre à jour ou ajouter l’issuer
+    if let Some(existing) = issuers.iter_mut().find(|i| i.address == address) {
+        existing.legal_name = legal_name;
+        existing.credential_types = credential_types;
+    } else {
+        issuers.push(IssuerInfo {
+            address,
+            legal_name,
+            credential_types,
+        });
+    }
+    save_issuers(&issuers);
+
+    (StatusCode::OK, Json(json!({ "success": true })))
+}
 
 // ------------------------------------------------------------------------
 // TOTP handlers (Google Authenticator)
@@ -996,20 +1145,18 @@ async fn totp_setup(
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "userId required" })));
     }
 
-    // Générer 20 octets aléatoires
     let secret_bytes: [u8; 20] = rand::random();
     let secret_base32 = base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &secret_bytes);
 
-    // Construire l'URI otpauth
     let otpauth_url = format!(
         "otpauth://totp/QS-DID:{}?secret={}&issuer=QS-DID&algorithm=SHA1&digits=6&period=30",
         user_id, secret_base32
     );
 
-    // Stocker le secret (base32)
     {
         let mut totp_secrets = state.totp_secrets.lock().unwrap();
-        totp_secrets.insert(user_id, secret_base32.clone());
+        totp_secrets.insert(user_id.clone(), secret_base32.clone());
+        save_totp_secrets(&totp_secrets); // ← AJOUT
     }
 
     (StatusCode::OK, Json(json!({
@@ -1017,7 +1164,6 @@ async fn totp_setup(
         "secret": secret_base32,
     })))
 }
-
 async fn totp_verify(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
@@ -1081,8 +1227,57 @@ async fn totp_store(
     {
         let mut totp_secrets = state.totp_secrets.lock().unwrap();
         totp_secrets.insert(user_id.to_string(), secret.to_string());
+        save_totp_secrets(&totp_secrets); // ← AJOUT
     }
     (StatusCode::OK, Json(json!({ "success": true })))
+}
+const TOTP_FILE: &str = "totp_secrets.json";
+
+fn load_totp_secrets() -> HashMap<String, String> {
+    if !StdPath::new(TOTP_FILE).exists() {
+        return HashMap::new();
+    }
+    let data = fs::read_to_string(TOTP_FILE).unwrap_or_default();
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn save_totp_secrets(secrets: &HashMap<String, String>) {
+    let data = serde_json::to_string_pretty(secrets).unwrap();
+    fs::write(TOTP_FILE, data).unwrap();
+}
+
+const CREDENTIAL_REQUESTS_FILE: &str = "credential_requests.json";
+
+fn load_credential_requests() -> HashMap<String, CredentialRequest> {
+    if !StdPath::new(CREDENTIAL_REQUESTS_FILE).exists() {
+        return HashMap::new();
+    }
+    let data = fs::read_to_string(CREDENTIAL_REQUESTS_FILE).unwrap_or_default();
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+async fn get_credential_requests(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let issuer = params.get("issuer").cloned();
+    let holder = params.get("holder").cloned();
+    let requests = state.credential_requests.lock().unwrap();
+    let filtered: Vec<CredentialRequest> = requests
+        .values()
+        .filter(|r| {
+            let issuer_match = if let Some(ref iss) = issuer { r.issuer == *iss } else { true };
+            let holder_match = if let Some(ref hol) = holder { r.holder == *hol } else { true };
+            issuer_match && holder_match
+        })
+        .cloned()
+        .collect();
+    Json(json!({ "requests": filtered }))
+}
+
+fn save_credential_requests(requests: &HashMap<String, CredentialRequest>) {
+    let data = serde_json::to_string_pretty(requests).unwrap();
+    fs::write(CREDENTIAL_REQUESTS_FILE, data).unwrap();
 }
 
 // ============================================================================
@@ -1102,7 +1297,11 @@ async fn main() {
         kem_keys: Arc::new(Mutex::new(HashMap::new())),
         challenges: Arc::new(Mutex::new(HashMap::new())),
         dids: Arc::new(Mutex::new(HashMap::new())),
-        totp_secrets: Arc::new(Mutex::new(HashMap::new())),    
+        totp_secrets: Arc::new(Mutex::new(load_totp_secrets())), 
+        issuers: Arc::new(Mutex::new(load_issuers())), 
+        credential_requests: Arc::new(Mutex::new(load_credential_requests())),
+
+
     };
     
     let cors = CorsLayer::new()
@@ -1112,7 +1311,7 @@ async fn main() {
     
     let app = Router::new()
         .route("/health", get(health))
-        .route("/challenge", post(generate_challenge)) 
+        .route("/challenge", post(generate_challenge))
         .route("/keys/generate", post(generate_keys))
         .route("/sign", post(sign_document))
         .route("/verify", post(verify_signature))
@@ -1136,10 +1335,14 @@ async fn main() {
         .route("/api/totp/setup", post(totp_setup))
         .route("/api/totp/verify", post(totp_verify))
         .route("/api/totp/store", post(totp_store))
-
+        .route("/credential-requests", post(create_credential_request))
+        .route("/credential-requests", get(get_credential_requests))
+        .route("/credential-requests/{id}", put(update_credential_request))
+        .route("/issuers", get(list_issuers))
+        .route("/issuers", post(register_issuer))
         .layer(cors)
         .with_state(state);
-    
+
     let addr = "0.0.0.0:8083";
     info!("🌐 Listening on http://{}", addr);
     
