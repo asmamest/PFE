@@ -23,6 +23,8 @@ anyhow = "1.0"
 hex = "0.4"
 chrono = "0.4"
 thiserror = "2.0.18"
+uuid = { version = "1", features = ["v4", "js"] }
+
 # rand_core = "0.10.0"
 
 [dev-dependencies]

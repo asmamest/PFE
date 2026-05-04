@@ -4,6 +4,8 @@ use reqwest::Client;
 use serde_json::json;
 use std::cell::RefCell;
 use hex;
+use base64::Engine;
+use uuid::Uuid;
 use hybrid_signer::{HybridSigner, CompositeSignature};
 use base64::engine::general_purpose::STANDARD as BASE64;
 
@@ -73,8 +75,10 @@ async fn api_post(endpoint: &str, body: JsValue) -> Result<JsValue, JsValue> {
     let url = format!("{}/{}", get_api_base_url(), endpoint);
     let client = Client::new();
     
-    let body_string = serde_json::to_string(&body)
-        .map_err(|e| JsValue::from_str(&format!("JSON error: {}", e)))?;
+    let body_string = js_sys::JSON::stringify(&body)
+        .map_err(|e| JsValue::from_str(&e.as_string().unwrap_or_default()))?
+        .as_string()
+        .unwrap_or_default();
     
     let response = client
         .post(&url)
@@ -92,8 +96,8 @@ async fn api_post(endpoint: &str, body: JsValue) -> Result<JsValue, JsValue> {
         .await
         .map_err(|e| JsValue::from_str(&format!("Response error: {}", e)))?;
     
-    let json: JsValue = serde_json::from_str(&text)
-        .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}", e)))?;
+    let json = js_sys::JSON::parse(&text)
+        .map_err(|e| JsValue::from_str(&e.as_string().unwrap_or_default()))?;
     
     Ok(json)
 }
@@ -116,8 +120,8 @@ async fn api_get(endpoint: &str) -> Result<JsValue, JsValue> {
         .await
         .map_err(|e| JsValue::from_str(&format!("Response error: {}", e)))?;
     
-    let json: JsValue = serde_json::from_str(&text)
-        .map_err(|e| JsValue::from_str(&format!("JSON parse error: {}", e)))?;
+    let json = js_sys::JSON::parse(&text)
+        .map_err(|e| JsValue::from_str(&e.as_string().unwrap_or_default()))?;
     
     Ok(json)
 }
@@ -276,7 +280,7 @@ pub fn to_base64(data: &[u8]) -> String {
 #[wasm_bindgen]
 pub fn from_base64(base64_str: &str) -> Result<String, JsValue> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(base64_str)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        .map_err(|e: base64::DecodeError| JsValue::from_str(&e.to_string()))?;
     Ok(hex::encode(bytes))
 }
 
