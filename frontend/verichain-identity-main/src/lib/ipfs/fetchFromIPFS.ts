@@ -10,7 +10,7 @@ export async function fetchFromIPFS(cid: string): Promise<any> {
   for (const gateway of IPFS_GATEWAYS) {
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 4000); // 4s par gateway
+      const timeout = setTimeout(() => controller.abort(), 10000); // 10s par gateway
 
       const res = await fetch(`${gateway}${cid}`, {
         signal: controller.signal
