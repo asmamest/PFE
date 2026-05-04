@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { BadgeCheck, Inbox, ShieldX, Clock, CheckCircle2, Bell, Menu } from "lucide-react";
+import { BadgeCheck, Inbox, ShieldX, Clock, CheckCircle2, Bell, Menu, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { IdentityHeader } from "@/components/issuer/IdentityHeader";
@@ -15,81 +15,236 @@ import {
 import { IssuanceChart } from "@/components/issuer/IssuanceChart";
 import { RecentTransactions, type TxEvent } from "@/components/issuer/RecentTransactions";
 import { DashboardSidebar } from "@/components/issuer/DashboardSidebar";
-import { loadIssuerProfile, type IssuerProfile, saveIssuerProfile } from "@/lib/issuer-utils";
+import { ethers } from "ethers";
+import { USER_REGISTRY_ADDRESS, CREDENTIAL_REGISTRY_ADDRESS } from "@/lib/blockchain/constants";
+import userRegistryAbi from "@/lib/blockchain/UserRegistryAbi.json";
+import credentialRegistryAbi from "@/lib/blockchain/CredentialRegistryAbi.json";
+import { fetchFromIPFS, ipfs } from "@/lib/ipfs/ipfsClient";
 
-const day = 86_400_000;
+import { loadEncryptedMLDSAKey } from "@/lib/secureStorage";
+import { getPRFKey } from "@/lib/webauthnPrf";
+import { decryptWithPRF } from "@/lib/cryptoWrapper";
+import { issueCredential } from "@/lib/blockchain/CredentialRegistryService";
 
-// Build deterministic seed data from issuer's own credential types
-function buildSeedData(types: string[], baseTs: number) {
-  const safeTypes = types.length > 0 ? types : ["Credential générique"];
-  const requests: CredentialRequest[] = [
-    {
-      id: "req_001",
-      holder: "0x7B2d1e4f7a3c6b9d0e5f2a8c1b4d7e6f3a9c23F2",
-      holderName: "Alice Martin",
-      holderDid: "did:ethr:0x7B2d1e4f7a3c6b9d0e5f2a8c1b4d7e6f3a9c23F2",
-      holderPublicKey: "ml-dsa-65:0x3a7c8d9e1f2a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
-      credentialType: safeTypes[0],
-      requestedAt: baseTs - 2 * day,
-      message: `Demande pour ${safeTypes[0]} — promotion 2024.`,
-    },
-    {
-      id: "req_002",
-      holder: "0xA4c2b1d3e5f7a9b8c6d4e2f1a3b5c7d9e1f3a5b7",
-      holderName: "Karim Benali",
-      holderDid: "did:ethr:0xA4c2b1d3e5f7a9b8c6d4e2f1a3b5c7d9e1f3a5b7",
-      holderPublicKey: "ml-dsa-65:0x8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c",
-      credentialType: safeTypes[Math.min(1, safeTypes.length - 1)],
-      requestedAt: baseTs - 5 * day,
-    },
-  ];
-  const credentials: IssuedCredential[] = [
-    {
-      id: "cred_0xa1b2c3d4e5f6",
-      holder: "0x9F8e7d6c5b4a3210fedcba9876543210abcdef12",
-      type: safeTypes[0],
-      issuedAt: baseTs - 30 * day,
-      expiresAt: null,
-      status: "active",
-      txHash: "0x4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b",
-    },
-    {
-      id: "cred_0xb2c3d4e5f6a7",
-      holder: "0x123456789abcdef0123456789abcdef012345678",
-      type: safeTypes[Math.min(1, safeTypes.length - 1)],
-      issuedAt: baseTs - 90 * day,
-      expiresAt: baseTs + 365 * day,
-      status: "active",
-      txHash: "0x5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c",
-    },
-    {
-      id: "cred_0xc3d4e5f6a7b8",
-      holder: "0xabcdef0123456789abcdef0123456789abcdef01",
-      type: safeTypes[0],
-      issuedAt: baseTs - 200 * day,
-      expiresAt: baseTs - 10 * day,
-      status: "expired",
-      txHash: "0x6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d",
-    },
-    {
-      id: "cred_0xd4e5f6a7b8c9",
-      holder: "0x0987654321fedcba0987654321fedcba09876543",
-      type: safeTypes[Math.min(2, safeTypes.length - 1)],
-      issuedAt: baseTs - 60 * day,
-      expiresAt: baseTs + 180 * day,
-      status: "revoked",
-      txHash: "0x7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e",
-    },
-  ];
-  const events: TxEvent[] = credentials.map((c) => ({
-    id: c.id + "_tx",
-    type: c.status === "revoked" ? "revoked" : "issued",
-    credentialId: c.id,
-    holder: c.holder,
-    txHash: c.txHash,
-    timestamp: c.issuedAt,
+const API_BASE = "http://localhost:8083";
+
+interface IssuerProfile {
+  walletAddress: string;
+  did: string;
+  publicKey: string;
+  legalName: string;
+  credentialTypes: string[];
+  registeredAt: number;
+  cid: string;
+  verificationTag: string;
+}
+
+// ========== FONCTIONS UTILITAIRES ==========
+
+/**
+ * Calcule le hash Keccak‑256 (équivalent SHA‑3) d'une chaîne ou d'un Uint8Array.
+ */
+function keccak256Hash(data: string | Uint8Array): string {
+  if (typeof data === 'string') {
+    return ethers.keccak256(ethers.toUtf8Bytes(data));
+  }
+  return ethers.keccak256(data);
+}
+
+// ========== CHARGEMENT DES DONNÉES ==========
+
+async function loadIssuerIdentity(walletAddress: string): Promise<IssuerProfile | null> {
+  try {
+    if (!window.ethereum) throw new Error("MetaMask not available");
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const contract = new ethers.Contract(USER_REGISTRY_ADDRESS, userRegistryAbi, provider);
+    const user = await contract.getUser(walletAddress);
+    if (!user || !user.active) return null;
+
+    const rolesMask = Number(user.roles);
+    if (!(rolesMask & 1)) return null; // ROLE_ISSUER = 1
+
+    const cid = user.metadataCID;
+    const didDoc = await fetchFromIPFS(cid);
+    const legalName = didDoc.legalName || "Unknown Issuer";
+    const credentialTypes = didDoc.credentialTypes || [];
+    const publicKeyMultibase = didDoc.verificationMethod?.[0]?.publicKeyMultibase || "";
+    const verificationTag = didDoc.verificationTag || "";
+
+    return {
+      walletAddress,
+      did: `did:zk:${walletAddress}`,
+      publicKey: publicKeyMultibase,
+      legalName,
+      credentialTypes,
+      registeredAt: Number(user.registeredAt) * 1000,
+      cid,
+      verificationTag,
+    };
+  } catch (err) {
+    console.error("loadIssuerIdentity error:", err);
+    return null;
+  }
+}
+
+async function loadIssuedCredentials(issuerAddress: string): Promise<IssuedCredential[]> {
+  try {
+    if (!window.ethereum) throw new Error("MetaMask not available");
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const contract = new ethers.Contract(CREDENTIAL_REGISTRY_ADDRESS, credentialRegistryAbi, provider);
+    // ✅ Utilisation de la bonne méthode : getIssuerCredentials
+    const credentialIds: string[] = await contract.getIssuerCredentials(issuerAddress);
+    const credentials: IssuedCredential[] = [];
+
+    for (const id of credentialIds) {
+      const cred = await contract.getCredential(id);
+      const statusCode = Number(cred.status);
+      let status: CredentialStatus;
+      if (statusCode === 0) status = "active";
+      else if (statusCode === 1) status = "revoked";
+      else if (statusCode === 2) status = "expired";
+      else status = "active";
+
+      let credentialType = "Credential";
+      if (cred.metadataCID) {
+        const meta = await fetchFromIPFS(cred.metadataCID);
+        credentialType = meta.type || credentialType;
+      }
+
+      const issuedAt = Number(cred.issuedAt) * 1000;
+      const expiresAt = cred.expiresAt === 0n || cred.expiresAt === 0 ? null : Number(cred.expiresAt) * 1000;
+
+      credentials.push({
+        id,
+        holder: cred.holder,
+        type: credentialType,
+        issuedAt,
+        expiresAt,
+        status,
+        txHash: "", // Le contrat ne stocke pas txHash, on peut le laisser vide ou le récupérer via events
+      });
+    }
+    return credentials;
+  } catch (err) {
+    console.error("loadIssuedCredentials error:", err);
+    return [];
+  }
+}
+
+async function loadTransactions(issuerAddress: string): Promise<TxEvent[]> {
+  try {
+    if (!window.ethereum) throw new Error("MetaMask not available");
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    const contract = new ethers.Contract(CREDENTIAL_REGISTRY_ADDRESS, credentialRegistryAbi, provider);
+    
+    // Récupérer le bloc actuel pour limiter la recherche (optionnel)
+    const currentBlock = await provider.getBlockNumber();
+    const fromBlock = currentBlock - 10000; // Derniers 10000 blocs (ajuster selon besoin)
+    
+    // Filtrer les events CredentialIssued où l'issuer correspond
+    const issuedFilter = contract.filters.CredentialIssued(null, issuerAddress);
+    const issuedEvents = await contract.queryFilter(issuedFilter, fromBlock);
+    
+    // Filtrer les events CredentialRevoked où l'issuer correspond
+    const revokedFilter = contract.filters.CredentialRevoked(null, issuerAddress);
+    const revokedEvents = await contract.queryFilter(revokedFilter, fromBlock);
+    
+    const events: TxEvent[] = [];
+    
+    for (const event of issuedEvents) {
+      const decoded = contract.interface.parseLog(event);
+      if (!decoded) continue;
+      const credentialId = decoded.args.credentialId;
+      const holder = decoded.args.holder;
+      const txHash = event.transactionHash;
+      const timestamp = (await event.getBlock()).timestamp;
+      events.push({
+        id: `${credentialId}_issued`,
+        type: "issued",
+        credentialId,
+        holder,
+        txHash,
+        timestamp: timestamp * 1000,
+      });
+    }
+    
+    for (const event of revokedEvents) {
+      const decoded = contract.interface.parseLog(event);
+      if (!decoded) continue;
+      const credentialId = decoded.args.credentialId;
+      const holder = undefined; // L'event CredentialRevoked ne contient pas holder par défaut, mais on peut le récupérer depuis le credential
+      const txHash = event.transactionHash;
+      const timestamp = (await event.getBlock()).timestamp;
+      events.push({
+        id: `${credentialId}_revoked`,
+        type: "revoked",
+        credentialId,
+        holder,
+        txHash,
+        timestamp: timestamp * 1000,
+      });
+    }
+    
+    // Trier par timestamp décroissant
+    events.sort((a, b) => b.timestamp - a.timestamp);
+    return events;
+  } catch (err) {
+    console.error("loadTransactions error:", err);
+    return [];
+  }
+}
+
+async function loadPendingRequests(issuerAddress: string): Promise<CredentialRequest[]> {
+  try {
+    const res = await fetch(`http://localhost:8083/credential-requests?issuer=${issuerAddress}&status=pending`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    // Transformer les champs du backend vers ceux attendus par le composant PendingRequests
+    return (data.requests || []).map((req: any) => ({
+      id: req.id,
+      holder: req.holder,
+      credentialType: req.credential_type,
+      message: req.message,
+      status: req.status,
+      requestedAt: req.requested_at * 1000,
+    }));
+
+  } catch (err) {
+    console.error("loadPendingRequests error:", err);
+    return [];
+  }
+}
+
+async function enrichRequestsWithHolderInfo(requests: any[]): Promise<CredentialRequest[]> {
+  const enriched = await Promise.all(requests.map(async (req) => {
+    // req contient déjà id, holder, credentialType, message, status, requestedAt (en ms)
+    let holderName = "";
+    let holderDid = "";
+    let holderPublicKey = "";
+    try {
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const contract = new ethers.Contract(USER_REGISTRY_ADDRESS, userRegistryAbi, provider);
+      const user = await contract.getUser(req.holder);
+      if (user && user.active) {
+        const cid = user.metadataCID;
+        if (cid) {
+          const profile = await fetchFromIPFS(cid);
+          holderName = profile.fullName || "";
+        }
+        holderDid = `did:zk:${req.holder}`;
+      }
+    } catch (err) {
+      console.error(`Failed to fetch holder info for ${req.holder}:`, err);
+    }
+    // Conserver toutes les propriétés déjà existantes, ajouter les nouvelles
+    return {
+      ...req,               // garde id, holder, credentialType, message, status, requestedAt
+      holderName,
+      holderDid,
+      holderPublicKey,
+    };
   }));
-  return { requests, credentials, events };
+  return enriched;
 }
 
 function IssuerDashboard() {
@@ -101,54 +256,57 @@ function IssuerDashboard() {
   const [events, setEvents] = useState<TxEvent[]>([]);
   const [notifOpen, setNotifOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [issuing, setIssuing] = useState(false); // état pour le bouton d'émission
+
 
   useEffect(() => {
-    // 1. Essayer de charger le profil existant
-    let p = loadIssuerProfile();
-    
-    // 2. Si pas de profil, créer un profil de test
-    if (!p) {
-      console.log("⚠️ Aucun profil trouvé, création d'un profil de test...");
+    const init = async () => {
+      setLoading(true);
+      try {
+        if (!window.ethereum) {
+          toast.error("MetaMask not installed");
+          navigate("/login");
+          return;
+        }
+        const accounts = await window.ethereum.request({ method: "eth_accounts" });
+        let addr = accounts?.[0];
+        if (!addr) {
+          const newAccounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+          addr = newAccounts?.[0];
+        }
+        if (!addr) {
+          navigate("/login");
+          return;
+        }
+        const issuerProfile = await loadIssuerIdentity(addr);
+        if (!issuerProfile) {
+          toast.error("Vous n'êtes pas enregistré en tant qu'issuer. Veuillez compléter l'onboarding.");
+          navigate("/onboarding");
+          return;
+        }
+        setProfile(issuerProfile);
+
+        const creds = await loadIssuedCredentials(addr);
+        setCredentials(creds);
+
+        // Chargement des demandes en attente depuis le backend
+        const pendingReqs = await loadPendingRequests(addr);
+        const enrichedReqs = await enrichRequestsWithHolderInfo(pendingReqs);
+        setRequests(enrichedReqs);
+
       
-      const testWallet = "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb5";
-      const testProfile: IssuerProfile = {
-        walletAddress: testWallet,
-        did: `did:ethr:${testWallet}`,
-        publicKey: "ml-dsa-65:0x3a7c8d9e1f2a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e",
-        legalName: "ENICarthage",
-        credentialTypes: ["Diplôme Universitaire", "Certification Professionnelle", "Attestation de Compétence"],
-        registeredAt: Date.now(),
-        cid: "QmTest123456789",
-        verificationTag: "edgedoc:demo:test123",
-      };
-      
-      // Sauvegarder le profil
-      saveIssuerProfile(testProfile);
-      sessionStorage.setItem(`qsdid.issuer.${testWallet}`, JSON.stringify(testProfile));
-      
-      // Créer aussi une identity
-      const testIdentity = {
-        did: testProfile.did,
-        walletAddress: testWallet,
-        publicKey: testProfile.publicKey,
-        role: "issuer",
-        accountType: "organization",
-        createdAt: Date.now(),
-      };
-      sessionStorage.setItem("qsdid.identity", JSON.stringify(testIdentity));
-      
-      p = testProfile;
-    }
-    
-    setProfile(p);
-    
-    // 3. Générer les données seed avec les types du profil
-    const seed = buildSeedData(p?.credentialTypes ?? [], Date.now());
-    setRequests(seed.requests);
-    setCredentials(seed.credentials);
-    setEvents(seed.events);
-    setLoading(false);
-  }, []);
+        const txs = await loadTransactions(addr);
+        setEvents(txs);
+
+      } catch (err) {
+        console.error(err);
+        toast.error("Erreur lors du chargement du tableau de bord");
+      } finally {
+        setLoading(false);
+      }
+    };
+    init();
+  }, [navigate]);
 
   const stats = useMemo(() => {
     const total = credentials.length;
@@ -159,26 +317,142 @@ function IssuerDashboard() {
     return { total, active, revoked, expired, pending };
   }, [credentials, requests]);
 
-  const handleIssue = async (req: CredentialRequest, expiration: number | null, _file: File) => {
-    await new Promise((r) => setTimeout(r, 1500));
-    const id = `cred_0x${Math.random().toString(16).slice(2, 14)}`;
-    const txHash = `0x${Math.random().toString(16).slice(2).padEnd(64, "0").slice(0, 64)}`;
-    const newCred: IssuedCredential = {
-      id,
-      holder: req.holder,
-      type: req.credentialType,
-      issuedAt: Date.now(),
-      expiresAt: expiration,
-      status: "active",
-      txHash,
-    };
-    setCredentials((prev) => [newCred, ...prev]);
-    setEvents((prev) => [
-      { id: id + "_tx", type: "issued", credentialId: id, holder: req.holder, txHash, timestamp: Date.now() },
-      ...prev,
-    ]);
-    setRequests((prev) => prev.filter((r) => r.id !== req.id));
-    toast.success("Credential émis", { description: `Type : ${req.credentialType}` });
+  // ========== HANDLE ISSUE (ÉMISSION D'UN CREDENTIAL) ==========
+  const handleIssue = async (req: CredentialRequest, expiration: number | null, file: File) => {
+    if (!file) {
+      toast.error("Veuillez sélectionner un document");
+      return;
+    }
+    if (!profile?.walletAddress) {
+      toast.error("Profil issuer non chargé");
+      return;
+    }
+
+    setIssuing(true);
+
+    try {
+      // 1. Lire le fichier et calculer docHash
+      const fileBuffer = await file.arrayBuffer();
+      const fileBytes = new Uint8Array(fileBuffer);
+      const docHash = ethers.keccak256(fileBytes);
+
+      // 2. Simulation EdgeDoc AI : génération d'un masque et d'un score
+      //    (à remplacer par un vrai appel à votre service)
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const maskData = new TextEncoder().encode(`AI-segmentation-mask-for-${docHash}`);
+      const { cid: maskCID } = await ipfs.add(maskData);
+      const maskHash = ethers.keccak256(maskData);
+      const classificationScore = 98.5; // score de confiance
+
+      // 3. Récupération des clés privées de l'issuer (déchiffrement via PRF)
+      const encryptedData = await loadEncryptedMLDSAKey(profile.walletAddress);
+      if (!encryptedData) throw new Error("Clé privée introuvable");
+      const prfKey = await getPRFKey(encryptedData.credentialId);
+      const decryptedJson = await decryptWithPRF(prfKey, encryptedData.ciphertext, encryptedData.iv);
+      const privateKeys = JSON.parse(decryptedJson); // { pq_secret, classical_secret, pq_public, classical_public }
+
+      // 4. Construction du payload composite (tous les éléments liés)
+      const now = Date.now();
+      const compositePayload = {
+        docHash,
+        maskHash,
+        classificationScore: Math.round(classificationScore * 100), // entier
+        holder: req.holder,
+        issuer: profile.walletAddress,
+        issuedAt: now,
+        expiryDate: expiration || null,
+        credentialType: req.credentialType,
+      };
+      // Sérialisation déterministe (tri des clés)
+      const sortedKeys = Object.keys(compositePayload).sort();
+      const compositeString = JSON.stringify(compositePayload, sortedKeys);
+      const compositeHash = ethers.keccak256(ethers.toUtf8Bytes(compositeString));
+
+      // 5. Signature du compositeHash par l'issuer (via backend)
+      const payloadB64 = btoa(compositeString);
+      const signResponse = await fetch(`${API_BASE}/sign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          document: payloadB64,
+          private_key: {
+            pq_secret: privateKeys.pq_secret,
+            classical_secret: privateKeys.classical_secret,
+            pq_public: privateKeys.pq_public,
+            classical_public: privateKeys.classical_public,
+          }
+        })
+      });
+      if (!signResponse.ok) {
+        const errText = await signResponse.text();
+        throw new Error(`Signature failed: ${errText}`);
+      }
+      const signatureData = await signResponse.json();
+
+      // 6. Stockage sur IPFS du bundle complet (credential + signature)
+      const credentialBundle = {
+        name: req.credentialType,
+        docHash,
+        maskHash,
+        maskCID: maskCID.toString(),
+        classificationScore,
+        compositeHash,
+        signature: signatureData.signature_json,
+        signatureId: signatureData.signature_id,
+        issuer: profile.walletAddress,
+        holder: req.holder,
+        issuedAt: now,
+        expiryDate: expiration,
+        credentialType: req.credentialType,
+        aiVerified: true, // à remplacer par le vrai résultat d'EdgeDoc
+      };
+      const bundleBuffer = new TextEncoder().encode(JSON.stringify(credentialBundle));
+      const { cid: bundleCID } = await ipfs.add(bundleBuffer);
+      const ipfsCID = bundleCID.toString();
+
+      // 7. Métadonnées (affichage frontend)
+      const metadata = {
+        credentialType: req.credentialType,
+        message: req.message || "",
+        issuedAt: now,
+        expiresAt: expiration,
+      };
+      const metadataBuffer = new TextEncoder().encode(JSON.stringify(metadata));
+      const { cid: metadataCID } = await ipfs.add(metadataBuffer);
+      const metadataCIDString = metadataCID.toString();
+
+      // 8. Appel au contrat CredentialRegistry
+      const expiresAtSeconds = expiration ? Math.floor(expiration / 1000) : 0;
+      const credentialId = await issueCredential(
+        compositeHash,        // docHash du contrat (on y stocke le compositeHash)
+        ipfsCID,
+        req.holder,
+        expiresAtSeconds,
+        metadataCIDString
+      );
+
+      toast.success(`Credential émis avec succès ! ID: ${credentialId}`);
+
+      // 9. Mise à jour de la demande dans le backend
+      await fetch(`${API_BASE}/credential-requests/update/${req.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: "approved", credentialId }),
+      });
+
+      // 10. Rafraîchir les listes
+      const pendingReqs = await loadPendingRequests(profile.walletAddress);
+      const enrichedReqs = await enrichRequestsWithHolderInfo(pendingReqs);
+      setRequests(enrichedReqs);
+      const creds = await loadIssuedCredentials(profile.walletAddress);
+      setCredentials(creds);
+
+    } catch (err: any) {
+      console.error(err);
+      toast.error(`Erreur lors de l'émission : ${err.message}`);
+    } finally {
+      setIssuing(false);
+    }
   };
 
   const handleReject = (req: CredentialRequest, _reason: string) => {
@@ -186,39 +460,36 @@ function IssuerDashboard() {
   };
 
   const handleRevoke = (id: string, _reason: string) => {
-    setCredentials((prev) =>
-      prev.map((c) => (c.id === id ? { ...c, status: "revoked" as CredentialStatus } : c)),
-    );
-    const cred = credentials.find((c) => c.id === id);
-    if (cred) {
-      setEvents((prev) => [
-        {
-          id: id + "_rev_" + Date.now(),
-          type: "revoked",
-          credentialId: id,
-          holder: cred.holder,
-          txHash: cred.txHash,
-          timestamp: Date.now(),
-        },
-        ...prev,
-      ]);
-    }
+    // Implémenter l’appel au contrat pour révoquer
+    toast.info("Fonctionnalité à implémenter");
   };
 
   const handleLogout = () => {
-    sessionStorage.removeItem("qsdid.identity");
-    sessionStorage.removeItem("qsdid.issuerProfile");
-    if (profile?.walletAddress) {
-      sessionStorage.removeItem(`qsdid.issuer.${profile.walletAddress}`);
-    }
+    sessionStorage.clear();
     toast.success("Déconnecté");
-    navigate("/");
+    navigate("/login");
   };
 
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-background p-4">
+        <div className="text-center">
+          <h2 className="text-lg font-semibold">Aucune identité issuer trouvée</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Vous devez d'abord vous enregistrer en tant qu'issuer.
+          </p>
+          <button className="mt-4 rounded-md bg-primary px-4 py-2 text-white" onClick={() => navigate("/onboarding")}>
+            Aller à l'enregistrement
+          </button>
+        </div>
       </div>
     );
   }
@@ -228,11 +499,8 @@ function IssuerDashboard() {
       <DashboardSidebar onLogout={handleLogout} pendingCount={requests.length} />
 
       <div className="flex-1">
-        {/* Top bar - VERSION AGRANDIE */}
         <header className="sticky top-0 z-30 border-b border-border bg-background/80 backdrop-blur-xl">
           <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3 sm:px-8">
-            
-            {/* Partie gauche - Logo et titre */}
             <div className="flex items-center gap-3">
               <button className="lg:hidden text-muted-foreground" aria-label="Menu">
                 <Menu className="h-6 w-6" />
@@ -244,20 +512,16 @@ function IssuerDashboard() {
                 )}
               </div>
             </div>
-            
-            {/* Partie droite - IdentityHeader et notifications */}
+
             <div className="flex items-center gap-4">
-              {profile && (
-                <IdentityHeader
-                  walletAddress={profile.walletAddress}
-                  did={profile.did}
-                  publicKey={profile.publicKey}
-                  role="issuer"
-                  registeredAt={profile.registeredAt}
-                />
-              )}
-              
-              {/* Bouton notifications agrandi */}
+              <IdentityHeader
+                walletAddress={profile.walletAddress}
+                did={profile.did}
+                publicKey={profile.publicKey}
+                role="issuer"
+                registeredAt={profile.registeredAt}
+              />
+
               <div className="relative">
                 <button
                   onClick={() => setNotifOpen((v) => !v)}
@@ -271,14 +535,14 @@ function IssuerDashboard() {
                     </span>
                   )}
                 </button>
-                
+
                 {notifOpen && (
                   <div className="absolute right-0 top-full z-50 mt-2 w-80 rounded-lg border border-border bg-popover p-4 shadow-xl">
                     <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                       Notifications
                     </p>
                     {requests.length === 0 ? (
-                      <p className="text-sm text-muted-foreground">Tout est à jour</p>
+                      <p className="text-sm text-muted-foreground">Aucune demande en attente</p>
                     ) : (
                       <ul className="space-y-3">
                         {requests.slice(0, 5).map((r) => (
@@ -298,10 +562,9 @@ function IssuerDashboard() {
 
         <main className="space-y-6 p-4 sm:p-6">
           <motion.div
-            id="overview"
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            className="scroll-mt-20 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5"
+            className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5"
           >
             <StatCard label="Credentials émis" value={stats.total} icon={BadgeCheck} subtext="Total" delay={0} />
             <StatCard label="Actifs" value={stats.active} icon={CheckCircle2} tone="success" delay={0.05} />
@@ -310,7 +573,7 @@ function IssuerDashboard() {
             <StatCard label="En attente" value={stats.pending} icon={Inbox} tone="warning" subtext="À traiter" delay={0.2} />
           </motion.div>
 
-          <div id="requests" className="scroll-mt-20 grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="lg:col-span-1">
               <PendingRequests requests={requests} onIssue={handleIssue} onReject={handleReject} />
             </div>
@@ -319,11 +582,11 @@ function IssuerDashboard() {
             </div>
           </div>
 
-          <div id="credentials" className="scroll-mt-20">
+          <div>
             <IssuedCredentialsTable credentials={credentials} onRevoke={handleRevoke} />
           </div>
 
-          <div id="transactions" className="scroll-mt-20">
+          <div>
             <RecentTransactions events={events} />
           </div>
         </main>

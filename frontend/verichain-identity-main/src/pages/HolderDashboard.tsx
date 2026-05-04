@@ -1,5 +1,5 @@
 // src/pages/HolderDashboard.tsx
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { ethers } from "ethers";
 import { fetchHolderCredentials, type Credential } from "@/lib/holder/credentialService";
@@ -14,7 +14,8 @@ import { QuickActions } from "@/components/holder/QuickActions";
 import { Shield, Clock, Share2, Fingerprint } from "lucide-react";
 import { USER_REGISTRY_ADDRESS } from "@/lib/blockchain/constants";
 import userRegistryAbi from "@/lib/blockchain/UserRegistryAbi.json";
-import { fetchFromIPFS } from "@/lib/ipfs/ipfsClient"; // ✅ import du fallback resilient
+import { fetchFromIPFS } from "@/lib/ipfs/ipfsClient";
+import { RequestCredentialSection } from "@/components/holder/RequestCredentialSection"; // ✅ Ajout
 
 declare global {
   interface Window {
@@ -36,8 +37,10 @@ export default function HolderDashboard() {
   const [loading, setLoading] = useState(true);
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [credentialsLoading, setCredentialsLoading] = useState(true);
+  const stableAddressRef = useRef<string | null>(null);
 
-  // Chargement de l'identité réelle depuis la blockchain et IPFS (avec fallback)
+
+
   useEffect(() => {
     const loadRealIdentity = async () => {
       setLoading(true);
@@ -72,10 +75,10 @@ export default function HolderDashboard() {
         const cid = user.metadataCID;
         if (!cid) throw new Error("No metadata CID found");
 
-        // ✅ Lecture IPFS résiliente (multi‑gateway)
         const profile = await fetchFromIPFS(cid);
-
-        const fullName = profile.fullName || "Holder";
+        console.log("Holder profile from IPFS:", profile);
+        const fullName = profile.fullName || profile.name || "Holder";
+        console.log("Extracted fullName:", fullName);
         const did = `did:zk:${addr}`;
         const publicKey = profile.publicKeyMultibase || "";
 
@@ -86,6 +89,7 @@ export default function HolderDashboard() {
           publicKey,
           fullName,
         });
+        stableAddressRef.current = addr;
       } catch (err) {
         console.error("loadRealIdentity error:", err);
       } finally {
@@ -96,7 +100,6 @@ export default function HolderDashboard() {
     loadRealIdentity();
   }, []);
 
-  // Chargement des credentials (déjà corrigé dans credentialService.ts)
   useEffect(() => {
     if (identity?.walletAddress) {
       setCredentialsLoading(true);
@@ -106,6 +109,8 @@ export default function HolderDashboard() {
         .finally(() => setCredentialsLoading(false));
     }
   }, [identity]);
+
+
 
   const stats = useMemo(() => {
     const active = credentials.filter(c => c.status === "active").length;
@@ -161,6 +166,8 @@ export default function HolderDashboard() {
             <StatCards stats={statCards} />
             <MyCredentialsSection credentials={credentials} loading={credentialsLoading} />
             <ActivityTimeline />
+            {/* ✅ Section pour demander un credential */}
+            <RequestCredentialSection />
           </div>
         </main>
         <QuickActions />

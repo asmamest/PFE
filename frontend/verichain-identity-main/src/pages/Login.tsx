@@ -7,11 +7,11 @@ import { Input } from "@/components/ui/input";
 import { toast } from "@/hooks/use-toast";
 import { useAuthMachine } from "@/lib/qsdid/stateMachine";
 import { audit } from "@/lib/qsdid/audit";
+import { fetchFromIPFS } from "@/lib/ipfs/ipfsClient";
 import {
   initWasm,
   healthCheck,
   getChallenge,
-  signWithPrivateKeyHex,      // <-- ajout
   verifySignature,
   encodeUtf8ToB64,
 } from "@/lib/qsdid/wasmClient";
@@ -29,9 +29,9 @@ type Identity = {
   walletAddress: string;
   totpRef: string;
   publicKey?: string;
+  role: "holder" | "issuer"; // Ajout du rôle
 };
 
-// Reconstruction intégrale depuis la blockchain + IPFS
 async function loadIdentityFromBlockchain(walletAddress: string): Promise<Identity | null> {
   try {
     if (!window.ethereum) throw new Error("MetaMask not available");
@@ -41,16 +41,22 @@ async function loadIdentityFromBlockchain(walletAddress: string): Promise<Identi
     if (!user || !user.active) return null;
 
     const cid = user.metadataCID;
-    const response = await fetch(`https://ipfs.io/ipfs/${cid}`);
-    if (!response.ok) throw new Error(`IPFS fetch failed for CID ${cid}`);
-    const didDoc = await response.json();
+    const didDoc = await fetchFromIPFS(cid);
     const publicKeyMultibase = didDoc.verificationMethod?.[0]?.publicKeyMultibase || "";
+
+    // Déterminer le rôle à partir du bitmask (1 = issuer, 2 = holder)
+    const rolesMask = Number(user.roles);
+    let userRole: "holder" | "issuer" | null = null;
+    if (rolesMask & 1) userRole = "issuer";
+    else if (rolesMask & 2) userRole = "holder";
+    if (!userRole) return null;
 
     return {
       did: `did:zk:${walletAddress}`,
       walletAddress,
       totpRef: `did:zk:${walletAddress}`,
       publicKey: publicKeyMultibase,
+      role: userRole,
     };
   } catch (err) {
     console.error("loadIdentityFromBlockchain error:", err);
@@ -77,7 +83,6 @@ export default function Login() {
     initWasm(API_BASE).catch((e) => setError(String(e)));
   }, []);
 
-  // Au montage : demander la connexion MetaMask et reconstruire l'identité
   useEffect(() => {
     const load = async () => {
       setLoadingIdentity(true);
@@ -132,7 +137,6 @@ export default function Login() {
     setDebugSignature(null);
 
     try {
-      // 1. TOTP verification via backend
       setDebugStep("🔐 1. Vérification TOTP...");
       const verifyRes = await fetch("http://localhost:8083/api/totp/verify", {
         method: "POST",
@@ -147,13 +151,11 @@ export default function Login() {
       send("TOTP_VERIFIED");
       setDebugStep("✅ 1. TOTP vérifié");
 
-      // 2. Health check
       setDebugStep("🏥 2. Vérification backend...");
       await healthCheck();
       send("BACKEND_OK");
       setDebugStep("✅ 2. Backend OK");
 
-      // 3. Chargement de la clé privée chiffrée depuis IndexedDB
       setDebugStep("📦 3. Chargement de la clé privée chiffrée (IndexedDB)...");
       const encryptedData = await loadEncryptedMLDSAKey(identity.walletAddress);
       if (!encryptedData) {
@@ -161,7 +163,6 @@ export default function Login() {
       }
       setDebugStep(`✅ 3. Clé chargée (credentialId: ${encryptedData.credentialId.slice(0, 16)}...)`);
 
-      // 4. Obtention de la clé PRF (biométrie)
       setDebugStep("🔄 4. Validation biométrique (PRF)...");
       const prfKey = await getPRFKey(encryptedData.credentialId);
       if (!(prfKey instanceof CryptoKey)) {
@@ -169,14 +170,19 @@ export default function Login() {
       }
       setDebugStep("✅ 4. Clé PRF obtenue (biométrie validée)");
 
-      // 5. Déchiffrement des clés privées (pq + classical)
-      setDebugStep("🔓 5. Déchiffrement des clés privées...");
+      setDebugStep("🔓 5. Déchiffrement des clés privées et publiques...");
       const decryptedJson = await decryptWithPRF(prfKey, encryptedData.ciphertext, encryptedData.iv);
       if (!decryptedJson) throw new Error("Échec du déchiffrement");
-      const privateKeys = JSON.parse(decryptedJson); // { pq_secret, classical_secret }
-      setDebugStep("✅ 5. Clés privées déchiffrées (pq + classical)");
+      const keys = JSON.parse(decryptedJson);
+      const pq_secret = keys.pq_secret;
+      const classical_secret = keys.classical_secret;
+      const pq_public = keys.pq_public;
+      const classical_public = keys.classical_public;
+      if (!pq_secret || !classical_secret || !pq_public || !classical_public) {
+        throw new Error("Données de clés incomplètes dans le bundle. Veuillez refaire l'onboarding avec la version corrigée.");
+      }
+      setDebugStep("✅ 5. Clés déchiffrées (privées + publiques)");
 
-      // 6. Challenge
       setDebugStep("🎲 6. Demande de challenge...");
       send("CHALLENGE_REQUESTED");
       const challenge = await getChallenge("login");
@@ -189,7 +195,6 @@ export default function Login() {
       send("CHALLENGE_RECEIVED");
       setDebugStep(`✅ 6. Challenge reçu (expire dans ${Math.round((challenge.expires_at - Date.now() / 1000))}s)`);
 
-      // 7. Création du document à signer
       const docToSign = {
         ctx: "login",
         nonce: challenge.nonce,
@@ -199,9 +204,26 @@ export default function Login() {
       };
       const docB64 = encodeUtf8ToB64(JSON.stringify(docToSign));
 
-      // 8. Signature avec les clés privées (via backend qui reçoit les clés)
-      setDebugStep("✍️ 7. Signature ML-DSA (avec clés privées)...");
-      const sig = await signWithPrivateKeyHex(docB64, privateKeys.pq_secret, privateKeys.classical_secret);
+      setDebugStep("✍️ 7. Signature ML-DSA (via backend)...");
+      const signResponse = await fetch(`${API_BASE}/sign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          document: docB64,
+          challenge_id: challenge.challenge_id,
+          private_key: {
+            pq_secret,
+            classical_secret,
+            pq_public,
+            classical_public,
+          }
+        })
+      });
+      if (!signResponse.ok) {
+        const errText = await signResponse.text();
+        throw new Error(`Signing failed: ${errText}`);
+      }
+      const sig = await signResponse.json();
       setDebugSignature({
         id: sig.signature_id,
         algorithm: "ML-DSA-65",
@@ -210,14 +232,12 @@ export default function Login() {
       send("SIGNED");
       setDebugStep(`✅ 7. Signature créée: ${sig.signature_id.substring(0, 30)}...`);
 
-      // 9. Vérification de la signature (backend)
       setDebugStep("🔍 8. Vérification de la signature...");
       const v = await verifySignature(sig.signature_id, docB64);
       if (!v?.valid) throw new Error("Signature verification failed");
       send("VERIFIED");
       setDebugStep("✅ 8. Signature vérifiée");
 
-      // 10. Vérification du wallet
       setDebugStep("👛 9. Connexion au wallet...");
       if (!window.ethereum) throw new Error("MetaMask not available");
       const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
@@ -229,12 +249,17 @@ export default function Login() {
       send("WALLET_CONNECTED");
       setDebugStep(`✅ 9. Wallet connecté: ${addr.substring(0, 10)}...`);
 
-      // 11. Finalisation – redirection
       send("ACCESS_GRANTED");
       audit("SUCCESS", "Access granted", { did: identity.did });
       setDebugStep("✅ 10. Accès accordé ! Redirection...");
       toast({ title: "Authenticated", description: identity.did });
-      setTimeout(() => navigate("/holder"), 1500);
+
+      // Redirection selon le rôle
+      if (identity.role === "holder") {
+        setTimeout(() => navigate("/holder"), 1500);
+      } else {
+        setTimeout(() => navigate("/issuer/dashboard"), 1500);
+      }
     } catch (err: any) {
       const msg = err.message;
       setError(msg);
@@ -245,7 +270,6 @@ export default function Login() {
     }
   }, [identity, code, send, navigate]);
 
-  // Reste du JSX (identique)...
   if (loadingIdentity) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
@@ -273,7 +297,6 @@ export default function Login() {
 
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-background px-4 py-8">
-      {/* ... même JSX que l'original ... */}
       <motion.div
         initial={{ y: 20, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}

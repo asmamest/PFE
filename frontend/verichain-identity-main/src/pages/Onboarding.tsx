@@ -23,13 +23,12 @@ import { useAuthMachine, type AuthState } from "@/lib/qsdid/stateMachine";
 import { createPasskeyWithPRF, getPRFKey, isPRFSupported } from "@/lib/webauthnPrf";
 import { encryptWithPRF } from "@/lib/cryptoWrapper";
 import { storeEncryptedMLDSAKey } from "@/lib/secureStorage";
-import { storeDIDDocument, storeInitialHolderProfile  } from "@/lib/ipfs/ipfsClient";
+import { storeDIDDocument, storeInitialHolderProfile, storeInitialIssuerProfile  } from "@/lib/ipfs/ipfsClient";
 import { registerUserOnChain } from "@/lib/blockchain/UserRegistryService";
 import { hexToMultibase } from "@/lib/utils/encoding";
 import {
   initWasm,
   healthCheck,
-  generateHybridKeysLocal,
   getChallenge,
   signDocumentWithChallenge,
   verifySignature,
@@ -141,7 +140,9 @@ export default function Onboarding() {
       await healthCheck();
       send("BACKEND_OK");
       setInitProgress("Génération des clés post‑quantiques...");
-      const k = await generateHybridKeysLocal();
+      const response = await fetch(`${API_BASE}/keys/generate`, { method: 'POST' });
+      if (!response.ok) throw new Error('Failed to generate keys');
+      const k = await response.json();
       setKeys(k);
       send("KEYS_GENERATED");
       setInitProgress("Signature d’un challenge de test...");
@@ -242,11 +243,15 @@ export default function Onboarding() {
       if (!(prfKey instanceof CryptoKey)) throw new Error("Clé PRF invalide");
 
       // 🧠 Sérialiser les deux clés privées en JSON
-      const privateKeyBundle = {
+      const keyBundle = {
         pq_secret: keys.pq_secret_key,
         classical_secret: keys.classical_secret_key,
+        pq_public: keys.pq_public_key,
+        classical_public: keys.classical_public_key,
       };
-      const plaintext = JSON.stringify(privateKeyBundle);
+
+
+      const plaintext = JSON.stringify(keyBundle);
       const { ciphertext, iv } = await encryptWithPRF(prfKey, plaintext);
       await storeEncryptedMLDSAKey(walletAddr, { ciphertext, iv, credentialId });
 
@@ -304,7 +309,7 @@ export default function Onboarding() {
       if (role === "holder") {
         cid = await storeInitialHolderProfile(fullDid, multibaseKey);
       } else {
-        cid = await storeDIDDocument(fullDid, multibaseKey);
+        cid = await storeInitialIssuerProfile(fullDid, multibaseKey);
       }
 
       // 2. Enregistrement sur blockchain (zkSync Sepolia)

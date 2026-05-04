@@ -1,3 +1,4 @@
+// src/components/issuer/PendingRequests.tsx
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -56,6 +57,8 @@ export function PendingRequests({ requests, onIssue, onReject }: Props) {
     );
   });
 
+
+
   return (
     <div className="rounded-xl border border-border bg-card">
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
@@ -102,11 +105,8 @@ export function PendingRequests({ requests, onIssue, onReject }: Props) {
               >
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-foreground">{req.credentialType}</p>
-                  {req.holderName && (
-                    <p className="mt-0.5 truncate text-[11px] text-foreground/80">{req.holderName}</p>
-                  )}
                   <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
-                    {truncateMiddle(req.holder)}
+                    {req.holderName ? `${req.holderName} (${truncateMiddle(req.holder)})` : truncateMiddle(req.holder)}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
@@ -222,9 +222,6 @@ function RequestDialog({
           <MetaRow icon={<Wallet className="h-3 w-3" />} label="Wallet" value={req.holder} />
           {req.holderDid && (
             <MetaRow icon={<Fingerprint className="h-3 w-3" />} label="DID" value={req.holderDid} />
-          )}
-          {req.holderPublicKey && (
-            <MetaRow icon={<KeyRound className="h-3 w-3" />} label="ML-DSA" value={req.holderPublicKey} />
           )}
         </div>
 

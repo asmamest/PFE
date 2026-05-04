@@ -1,37 +1,85 @@
 // src/components/holder/RequestCredentialModal.tsx
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { toast } from "@/hooks/use-toast";
+
+interface IssuerInfo {
+  address: string;
+  legal_name: string;
+  credential_types: string[];
+}
 
 interface RequestCredentialModalProps {
-  did?: string;
+  holderDid: string;
+  holderAddress: string;
   onClose: () => void;
 }
 
-const MOCK_ISSUERS = [
-  { did: "did:zk:0x111...", name: "TU Berlin" },
-  { did: "did:zk:0x222...", name: "Acme Corp" },
-  { did: "did:zk:0x333...", name: "Government of France" },
-];
-
-export function RequestCredentialModal({ did, onClose }: RequestCredentialModalProps) {
-  const [selectedIssuer, setSelectedIssuer] = useState("");
+export function RequestCredentialModal({ holderDid, holderAddress, onClose }: RequestCredentialModalProps) {
+  const [issuers, setIssuers] = useState<IssuerInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedIssuerAddress, setSelectedIssuerAddress] = useState("");
   const [credentialType, setCredentialType] = useState("");
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    fetch("http://localhost:8083/issuers")
+      .then(res => res.json())
+      .then(data => {
+        setIssuers(data.issuers || []);
+        setLoading(false);
+      })
+      .catch(err => {
+        console.error(err);
+        toast({ title: "Error", description: "Failed to load issuers", variant: "destructive" });
+        setLoading(false);
+      });
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedIssuer || !credentialType) return;
-
+    if (!selectedIssuerAddress || !credentialType) {
+      toast({ title: "Missing fields", description: "Please select an issuer and enter a credential type", variant: "destructive" });
+      return;
+    }
     setSubmitting(true);
-    await new Promise((r) => setTimeout(r, 1500));
-    alert(`Demande envoyée à ${selectedIssuer} pour le credential "${credentialType}"`);
-    setSubmitting(false);
-    onClose();
+    try {
+      const response = await fetch("http://localhost:8083/credential-requests", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          holder: holderAddress,
+          issuer: selectedIssuerAddress,
+          credentialType,
+          message,
+        }),
+      });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || "Failed to send request");
+      }
+      toast({ title: "Request sent", description: `Your request for "${credentialType}" has been sent.` });
+      onClose();
+    } catch (err: any) {
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    } finally {
+      setSubmitting(false);
+    }
   };
+
+  if (loading) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4">
+        <div className="bg-card border border-border rounded-2xl w-full max-w-md p-6 shadow-2xl text-center">
+          <p>Loading issuers...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm p-4">
@@ -48,15 +96,15 @@ export function RequestCredentialModal({ did, onClose }: RequestCredentialModalP
             <Label htmlFor="issuer">Issuer</Label>
             <select
               id="issuer"
-              value={selectedIssuer}
-              onChange={(e) => setSelectedIssuer(e.target.value)}
+              value={selectedIssuerAddress}
+              onChange={(e) => setSelectedIssuerAddress(e.target.value)}
               className="w-full mt-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
               required
             >
               <option value="">Select an issuer</option>
-              {MOCK_ISSUERS.map((issuer) => (
-                <option key={issuer.did} value={issuer.name}>
-                  {issuer.name}
+              {issuers.map((issuer) => (
+                <option key={issuer.address} value={issuer.address}>
+                  {issuer.legal_name} ({issuer.address.slice(0, 6)}...{issuer.address.slice(-4)})
                 </option>
               ))}
             </select>
@@ -64,13 +112,23 @@ export function RequestCredentialModal({ did, onClose }: RequestCredentialModalP
 
           <div>
             <Label htmlFor="type">Credential Type</Label>
-            <Input
+            <select
               id="type"
               value={credentialType}
               onChange={(e) => setCredentialType(e.target.value)}
-              placeholder="e.g., Diploma, Employment Proof"
+              className="w-full mt-1 rounded-lg border border-border bg-background px-3 py-2 text-sm"
               required
-            />
+            >
+              <option value="">Select a credential type</option>
+              {selectedIssuerAddress &&
+                issuers
+                  .find(i => i.address === selectedIssuerAddress)
+                  ?.credential_types.map((type) => (
+                    <option key={type} value={type}>
+                      {type}
+                    </option>
+                  ))}
+            </select>
           </div>
 
           <div>

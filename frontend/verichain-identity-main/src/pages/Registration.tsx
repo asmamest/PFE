@@ -10,7 +10,7 @@ import { toast } from "@/hooks/use-toast";
 import IssuerRegistrationForm from "@/components/IssuerRegistrationForm";
 import { saveIssuerProfile } from "@/lib/issuer-utils";
 import { getUserMetadataCID, updateUserMetadataCID } from "@/lib/blockchain/UserRegistryService";
-import { addFullNameToHolderProfile } from "@/lib/ipfs/ipfsClient";
+import { addFullNameToHolderProfile, updateIssuerProfile } from "@/lib/ipfs/ipfsClient";
 
 type AccountType = "individual" | "organization";
 
@@ -152,7 +152,7 @@ export default function RegistrationPage() {
           <IssuerRegistrationForm
             accountType={type}
             walletAddress={wallet}
-            onComplete={({ verificationTag, cid, formData }) => {
+            onComplete={async ({ verificationTag, cid, formData }) => {
               // ===== SAUVEGARDE COMPLÈTE DU PROFIL =====
               let existingIdentity = null;
               try {
@@ -178,7 +178,7 @@ export default function RegistrationPage() {
 
               sessionStorage.setItem("qsdid.identity", JSON.stringify(identity));
 
-              const issuerProfile = {
+              let issuerProfile = {
                 walletAddress: wallet,
                 did: identity.did,
                 publicKey: identity.publicKey,
@@ -202,7 +202,39 @@ export default function RegistrationPage() {
 
               console.log("✅ Profil issuer sauvegardé:", issuerProfile);
 
-              setCompleted({ cid, verificationTag });
+              // ===== MISE À JOUR IPFS ET BLOCKCHAIN AVEC LES INFOS ISSUER =====
+              let finalCID = cid;
+              try {
+                const oldCID = await getUserMetadataCID(wallet);
+                if (oldCID) {
+                  const newCID = await updateIssuerProfile(oldCID, formData.legalName, formData.credentialTypes, verificationTag);
+                  await updateUserMetadataCID(newCID);
+                  finalCID = newCID;
+                  // Mettre à jour le profil local avec le nouveau CID
+                  issuerProfile.cid = newCID;
+                  saveIssuerProfile(issuerProfile);
+                  sessionStorage.setItem(`qsdid.issuer.${wallet}`, JSON.stringify(issuerProfile));
+                }
+              } catch (err) {
+                console.error("Failed to update issuer profile on IPFS/blockchain:", err);
+              }
+
+              // Enregistrer l’issuer dans le backend (persistant)
+              try {
+                await fetch('http://localhost:8083/issuers', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    address: wallet,
+                    legalName: formData.legalName,
+                    credentialTypes: formData.credentialTypes,
+                  }),
+                });
+              } catch (err) {
+                console.error("Failed to register issuer in backend:", err);
+              }
+
+              setCompleted({ cid: finalCID, verificationTag });
             }}
           />
         </div>
