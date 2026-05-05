@@ -1,11 +1,16 @@
-import { useState } from "react";
-import { Search, Eye, Share2, Lock, Unlock } from "lucide-react";
+// src/components/holder/MyCredentialsSection.tsx
+import { useState, useEffect } from "react";
+import { ethers } from "ethers";
+import { Search, Lock, Unlock } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "@/hooks/use-toast";
 import type { Credential } from "@/lib/holder/credentialService";
+import { USER_REGISTRY_ADDRESS } from "@/lib/blockchain/constants";
+import userRegistryAbi from "@/lib/blockchain/UserRegistryAbi.json";
+import { fetchFromIPFS } from "@/lib/ipfs/ipfsClient";
 
 interface MyCredentialsSectionProps {
   credentials: Credential[];
@@ -18,6 +23,45 @@ export function MyCredentialsSection({ credentials, loading }: MyCredentialsSect
   const [shareModal, setShareModal] = useState<Credential | null>(null);
   const [shareType, setShareType] = useState<"full" | "selective">("full");
   const [selectedAttrs, setSelectedAttrs] = useState<string[]>([]);
+  const [issuerNameCache, setIssuerNameCache] = useState<Record<string, string>>({});
+
+  // Récupère le nom légal d'un issuer à partir de son adresse (via contrat + IPFS)
+  const fetchIssuerLegalName = async (address: string): Promise<string> => {
+    try {
+      if (!window.ethereum) throw new Error("MetaMask not installed");
+      const provider = new ethers.BrowserProvider(window.ethereum);
+      const contract = new ethers.Contract(USER_REGISTRY_ADDRESS, userRegistryAbi, provider);
+      const user = await contract.getUser(address);
+      if (!user || !user.active) throw new Error("Issuer not found or inactive");
+      const cid = user.metadataCID;
+      if (!cid) throw new Error("No metadata CID");
+      const profile = await fetchFromIPFS(cid);
+      return profile.legalName || profile.legal_name || profile.name || address;
+    } catch (err) {
+      console.error(`Failed to fetch issuer name for ${address}:`, err);
+      return address; // fallback à l'adresse
+    }
+  };
+
+  // Charge les noms manquants pour les adresses uniques des credentials
+  useEffect(() => {
+    const loadMissingNames = async () => {
+      const uniqueAddresses = [...new Set(credentials.map(c => c.issuer))];
+      const missing = uniqueAddresses.filter(addr => !issuerNameCache[addr]);
+      if (missing.length === 0) return;
+      const updates: Record<string, string> = {};
+      await Promise.all(missing.map(async (addr) => {
+        const name = await fetchIssuerLegalName(addr);
+        updates[addr] = name;
+      }));
+      setIssuerNameCache(prev => ({ ...prev, ...updates }));
+    };
+    if (credentials.length > 0) {
+      loadMissingNames();
+    }
+  }, [credentials, issuerNameCache]);
+
+  const getIssuerName = (address: string) => issuerNameCache[address] || address;
 
   const filtered = credentials.filter(c =>
     c.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -67,7 +111,9 @@ export function MyCredentialsSection({ credentials, loading }: MyCredentialsSect
             <div className="flex justify-between items-start">
               <div>
                 <h3 className="font-semibold text-foreground">{cred.name}</h3>
-                <p className="text-xs text-muted-foreground">{cred.issuer}</p>
+                <p className="text-xs text-muted-foreground">
+                  {getIssuerName(cred.issuer)}
+                </p>
               </div>
               <StatusBadge status={cred.status} />
             </div>
@@ -90,6 +136,7 @@ export function MyCredentialsSection({ credentials, loading }: MyCredentialsSect
         ))}
       </div>
 
+      {/* Dialogue de détail du credential */}
       <Dialog open={!!selectedCred} onOpenChange={() => setSelectedCred(null)}>
         <DialogContent>
           <DialogHeader>
@@ -97,21 +144,29 @@ export function MyCredentialsSection({ credentials, loading }: MyCredentialsSect
           </DialogHeader>
           {selectedCred && (
             <div className="space-y-3">
-              <p><strong>Issuer:</strong> {selectedCred.issuer}</p>
+              <p>
+                <strong>Issuer:</strong> {getIssuerName(selectedCred.issuer)}
+              </p>
               <p><strong>Issued:</strong> {selectedCred.issuedDate}</p>
               {selectedCred.expiryDate && <p><strong>Expires:</strong> {selectedCred.expiryDate}</p>}
-              <div><strong>Attributes:</strong></div>
-              {Object.entries(selectedCred.attributes).map(([k, v]) => (
-                <div key={k} className="flex justify-between border-b border-border/40 py-1">
-                  <span>{k}:</span> <span className="font-mono">{v}</span>
-                </div>
-              ))}
-              <p><strong>CID:</strong> <code className="text-xs">{selectedCred.ipfsCID || selectedCred.cid}</code></p>
+              {selectedCred.attributes && Object.keys(selectedCred.attributes).length > 0 && (
+                <>
+                  <div><strong>Attributes:</strong></div>
+                  {Object.entries(selectedCred.attributes).map(([k, v]) => (
+                    <div key={k} className="flex justify-between border-b border-border/40 py-1">
+                      <span>{k}:</span> <span className="font-mono break-all">{v as string}</span>
+                    </div>
+                  ))}
+                </>
+              )}
+              <p><strong>CID:</strong> <code className="text-xs break-all">{selectedCred.ipfsCID || selectedCred.cid}</code></p>
+              <p><strong>Status:</strong> <StatusBadge status={selectedCred.status} /></p>
             </div>
           )}
         </DialogContent>
       </Dialog>
 
+      {/* Dialogue de partage */}
       <Dialog open={!!shareModal} onOpenChange={() => setShareModal(null)}>
         <DialogContent>
           <DialogHeader>

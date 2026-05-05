@@ -434,7 +434,7 @@ function IssuerDashboard() {
       toast.success(`Credential émis avec succès ! ID: ${credentialId}`);
 
       // 9. Mise à jour de la demande dans le backend
-      await fetch(`${API_BASE}/credential-requests/update/${req.id}`, {
+      await fetch(`${API_BASE}/credential-requests/${req.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: "approved", credentialId }),
