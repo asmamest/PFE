@@ -1,4 +1,3 @@
-// src/components/issuer/PendingRequests.tsx
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -12,7 +11,6 @@ import {
   AlertTriangle,
   Wallet,
   Fingerprint,
-  KeyRound,
   Copy,
   CheckCheck,
   Search,
@@ -35,13 +33,21 @@ export interface CredentialRequest {
 
 interface Props {
   requests: CredentialRequest[];
-  onIssue: (req: CredentialRequest, expiration: number | null, document: File) => Promise<void>;
+  onIssue: (
+    req: CredentialRequest,
+    expiration: number | null,
+    document: File,
+    claims: Record<string, any>,
+    score: number ,
+    
+  ) => Promise<void>;
   onReject: (req: CredentialRequest, reason: string) => void;
+  issuerAddress: string;
 }
 
 type Mode = "list" | "accept" | "reject";
 
-export function PendingRequests({ requests, onIssue, onReject }: Props) {
+export function PendingRequests({ requests, onIssue, onReject,issuerAddress }: Props) {
   const [selected, setSelected] = useState<CredentialRequest | null>(null);
   const [mode, setMode] = useState<Mode>("list");
   const [search, setSearch] = useState("");
@@ -56,8 +62,6 @@ export function PendingRequests({ requests, onIssue, onReject }: Props) {
       r.credentialType.toLowerCase().includes(q)
     );
   });
-
-
 
   return (
     <div className="rounded-xl border border-border bg-card">
@@ -126,8 +130,8 @@ export function PendingRequests({ requests, onIssue, onReject }: Props) {
             mode={mode}
             setMode={setMode}
             onClose={() => setSelected(null)}
-            onIssue={async (exp, file) => {
-              await onIssue(selected, exp, file);
+            onIssue={async (exp, file, claims, score) => {
+              await onIssue(selected, exp, file, claims, score);
               setSelected(null);
             }}
             onReject={(reason) => {
@@ -135,6 +139,7 @@ export function PendingRequests({ requests, onIssue, onReject }: Props) {
               setSelected(null);
               toast.success("Demande refusée");
             }}
+            issuerAddress={issuerAddress} 
           />
         )}
       </AnimatePresence>
@@ -149,39 +154,146 @@ function RequestDialog({
   onClose,
   onIssue,
   onReject,
+  issuerAddress,
 }: {
   req: CredentialRequest;
   mode: Mode;
   setMode: (m: Mode) => void;
   onClose: () => void;
-  onIssue: (exp: number | null, file: File) => Promise<void>;
+  onIssue: (exp: number | null, file: File, claims: Record<string, any>, score: number) => Promise<void>;
   onReject: (reason: string) => void;
+  issuerAddress: string; 
 }) {
   const [expiration, setExpiration] = useState<string>("");
   const [file, setFile] = useState<File | null>(null);
-  const [aiState, setAiState] = useState<"idle" | "analyzing" | "valid" | "invalid">("idle");
+  const [edgeState, setEdgeState] = useState<"idle" | "analyzing" | "authentic" | "forged">("idle");
+  const [edgeScore, setEdgeScore] = useState<number | null>(null);
+  const [extractedClaims, setExtractedClaims] = useState<Record<string, any> | null>(null);
+  const [validated, setValidated] = useState(false);
   const [issuing, setIssuing] = useState(false);
   const [reason, setReason] = useState("");
+  const [extracting, setExtracting] = useState(false);
+  const [localizationMapBase64, setLocalizationMapBase64] = useState<string | null>(null);
 
-  const runEdgeDoc = async () => {
-    if (!file) return;
-    setAiState("analyzing");
-    await new Promise((r) => setTimeout(r, 2200));
-    const valid = Math.random() > 0.15;
-    setAiState(valid ? "valid" : "invalid");
-    if (!valid) toast.error("EdgeDoc : anomalie détectée dans le document");
-    else toast.success("Document authentifié par EdgeDoc AI");
+  const recordFailedAttempt = async () => {
+    try {
+      const res = await fetch("http://localhost:8083/record-failed-attempt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ issuer: issuerAddress }),
+      });
+      const data = await res.json();
+      if (data.banned) {
+        toast.error("Vous avez été banni pour 3 tentatives frauduleuses.");
+        setTimeout(() => window.location.href = "/login", 3000);
+      } else {
+        toast.warning(`Tentative frauduleuse enregistrée (${data.totalFails}/3).`);
+      }
+    } catch (err) {
+      console.error("Failed to record attempt:", err);
+    }
   };
 
+  // Appel réel à EdgeDoc (microservice)
+  const runEdgeDoc = async () => {
+    if (!file) return;
+    setEdgeState("analyzing");
+    const formData = new FormData();
+    formData.append("document", file);
+    try {
+      const res = await fetch("http://localhost:8085/edgedoc/analyze", {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.localizationMap) setLocalizationMapBase64(data.localizationMap);
+      // data doit contenir: { authentic: boolean, score: number, localizationMap: string (CID ou base64) }
+      setEdgeScore(data.score);
+      if (data.authentic) {
+        setEdgeState("authentic");
+        setEdgeScore(data.score);
+        toast.success("Document authentifié par EdgeDoc");
+        extractClaims(file);  // plus de localizationMap
+      } else {
+        setEdgeState("forged");
+        toast.error("EdgeDoc : manipulation détectée, émission impossible");
+        // Appel backend pour enregistrer la tentative frauduleuse
+        await recordFailedAttempt();
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error("Erreur lors de l'analyse EdgeDoc");
+      setEdgeState("idle");
+    }
+  };
+
+
+
+  // Extraction des champs via LLM
+
+  const extractClaims = async (file: File) => {
+    setExtracting(true);
+    const formData = new FormData();
+    formData.append("document", file);
+    try {
+      const res = await fetch("http://localhost:8085/extract", {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) throw new Error(`Extraction failed: ${res.status}`);
+      const result = await res.json();
+      if (result.success && result.data) {
+        // Aplatir l'objet imbriqué
+        const flattenObject = (obj: any, parentKey = ""): Record<string, any> => {
+          let flat: Record<string, any> = {};
+          for (const [key, value] of Object.entries(obj)) {
+            const newKey = parentKey ? `${parentKey}_${key}` : key;
+            if (value && typeof value === "object" && !Array.isArray(value)) {
+              flat = { ...flat, ...flattenObject(value, newKey) };
+            } else {
+              flat[newKey] = value;
+            }
+          }
+          return flat;
+        };
+        const flatClaims = flattenObject(result.data);
+        setExtractedClaims(flatClaims);
+        toast.success("Champs extraits avec succès");
+      } else {
+        throw new Error("Extraction failed: invalid response");
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error("Échec de l'extraction des champs");
+      setEdgeState("idle");
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+
   const handleIssue = async () => {
-    if (!file || aiState !== "valid") return;
+    if (!file || edgeState !== "authentic" || !extractedClaims || !validated) return;
     setIssuing(true);
     try {
       const exp = expiration ? new Date(expiration).getTime() : null;
-      await onIssue(exp, file);
+      await onIssue(exp, file, extractedClaims, edgeScore!);
+    } catch (err) {
+      toast.error("Erreur lors de l'émission");
     } finally {
       setIssuing(false);
     }
+  };
+
+  const reset = () => {
+    setFile(null);
+    setEdgeState("idle");
+    setExtractedClaims(null);
+    setValidated(false);
+    setExpiration("");
+    setEdgeScore(null);
+    setExtracting(false);
   };
 
   return (
@@ -247,6 +359,7 @@ function RequestDialog({
 
         {mode === "accept" && (
           <div className="space-y-3">
+            {/* Expiration */}
             <div>
               <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Date d'expiration (optionnel)
@@ -259,6 +372,7 @@ function RequestDialog({
               />
             </div>
 
+            {/* Upload du document */}
             <div>
               <label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                 Document à signer
@@ -271,46 +385,94 @@ function RequestDialog({
                   accept="application/pdf,image/*"
                   className="hidden"
                   onChange={(e) => {
-                    setFile(e.target.files?.[0] ?? null);
-                    setAiState("idle");
+                    const f = e.target.files?.[0] ?? null;
+                    setFile(f);
+                    if (f) {
+                      // Reset des états
+                      setEdgeState("idle");
+                      setExtractedClaims(null);
+                      setValidated(false);
+                      setEdgeScore(null);
+                      setExtracting(false);
+                    }
                   }}
                 />
               </label>
             </div>
 
-            {file && aiState === "idle" && (
+            {/* Bouton EdgeDoc (disponible si fichier uploade et état idle) */}
+            {file && edgeState === "idle" && (
               <Button onClick={runEdgeDoc} size="sm" variant="outline" className="w-full">
-                <ShieldCheck className="h-3.5 w-3.5" /> Vérifier avec EdgeDoc AI
+                <ShieldCheck className="h-3.5 w-3.5" /> Analyser avec EdgeDoc
               </Button>
             )}
 
-            {aiState === "analyzing" && (
+            {/* Analyse en cours */}
+            {edgeState === "analyzing" && (
               <div className="flex items-center justify-center gap-2 rounded-md bg-primary/5 py-2 text-xs text-primary">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Analyse en cours…
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Analyse EdgeDoc en cours…
               </div>
             )}
 
-            {aiState === "valid" && (
-              <div className="flex items-center gap-2 rounded-md bg-success/10 px-2 py-2 text-xs text-success">
-                <Check className="h-3.5 w-3.5" /> Document authentifié
+            {/* Document authentique */}
+            {edgeState === "authentic" && !extractedClaims && extracting && (
+              <div className="flex items-center justify-center gap-2 rounded-md bg-primary/5 py-2 text-xs text-primary">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Extraction des champs…
               </div>
             )}
 
-            {aiState === "invalid" && (
-              <div className="flex items-center gap-2 rounded-md bg-destructive/10 px-2 py-2 text-xs text-destructive">
-                <AlertTriangle className="h-3.5 w-3.5" /> Anomalie détectée
+            {edgeState === "authentic" && extractedClaims && (
+              <div className="rounded-md bg-secondary/30 p-3 text-sm space-y-2">
+                <p className="font-semibold text-xs">Champs extraits du document (authentifié) :</p>
+                {Object.entries(extractedClaims).map(([key, value]) => (
+                  <div key={key} className="flex justify-between border-b border-border/40 py-1">
+                    <span className="capitalize">{key}:</span>
+                    <span className="font-mono text-xs">{String(value)}</span>
+                  </div>
+                ))}
+                {edgeScore !== null && (
+                  <p className="text-[10px] text-muted-foreground mt-2">Score EdgeDoc : {(edgeScore * 100).toFixed(1)}%</p>
+                )}
+                <label className="flex items-center gap-2 mt-2">
+                  <input
+                    type="checkbox"
+                    checked={validated}
+                    onChange={(e) => setValidated(e.target.checked)}
+                  />
+                  <span className="text-xs">Je confirme que ces informations sont correctes</span>
+                </label>
               </div>
             )}
 
+            {localizationMapBase64 && (
+              <div className="rounded-md bg-secondary/20 p-2 text-center">
+                <p className="text-[9px] text-muted-foreground mb-1">Carte de localisation (visualisation seule)</p>
+                <img src={`data:image/png;base64,${localizationMapBase64}`} alt="Localisation" className="max-h-32 mx-auto" />
+              </div>
+            )}
+
+            {/* Document falsifié */}
+            {edgeState === "forged" && (
+              <div className="rounded-md bg-destructive/10 p-3 text-destructive text-sm">
+                ⚠️ Le document semble falsifié. Émission bloquée.
+              </div>
+            )}
+
+            {/* Bouton d'émission */}
             <Button
               onClick={handleIssue}
-              disabled={aiState !== "valid" || issuing}
+              disabled={
+                edgeState !== "authentic" ||
+                !extractedClaims ||
+                !validated ||
+                issuing
+              }
               size="sm"
               className="w-full"
             >
               {issuing ? (
                 <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Signature ML-DSA & on-chain…
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Signature & émission…
                 </>
               ) : (
                 <>

@@ -41,9 +41,6 @@ interface IssuerProfile {
 
 // ========== FONCTIONS UTILITAIRES ==========
 
-/**
- * Calcule le hash Keccak‑256 (équivalent SHA‑3) d'une chaîne ou d'un Uint8Array.
- */
 function keccak256Hash(data: string | Uint8Array): string {
   if (typeof data === 'string') {
     return ethers.keccak256(ethers.toUtf8Bytes(data));
@@ -92,7 +89,6 @@ async function loadIssuedCredentials(issuerAddress: string): Promise<IssuedCrede
     if (!window.ethereum) throw new Error("MetaMask not available");
     const provider = new ethers.BrowserProvider(window.ethereum);
     const contract = new ethers.Contract(CREDENTIAL_REGISTRY_ADDRESS, credentialRegistryAbi, provider);
-    // ✅ Utilisation de la bonne méthode : getIssuerCredentials
     const credentialIds: string[] = await contract.getIssuerCredentials(issuerAddress);
     const credentials: IssuedCredential[] = [];
 
@@ -121,7 +117,7 @@ async function loadIssuedCredentials(issuerAddress: string): Promise<IssuedCrede
         issuedAt,
         expiresAt,
         status,
-        txHash: "", // Le contrat ne stocke pas txHash, on peut le laisser vide ou le récupérer via events
+        txHash: "",
       });
     }
     return credentials;
@@ -137,15 +133,12 @@ async function loadTransactions(issuerAddress: string): Promise<TxEvent[]> {
     const provider = new ethers.BrowserProvider(window.ethereum);
     const contract = new ethers.Contract(CREDENTIAL_REGISTRY_ADDRESS, credentialRegistryAbi, provider);
     
-    // Récupérer le bloc actuel pour limiter la recherche (optionnel)
     const currentBlock = await provider.getBlockNumber();
-    const fromBlock = currentBlock - 10000; // Derniers 10000 blocs (ajuster selon besoin)
+    const fromBlock = currentBlock - 10000;
     
-    // Filtrer les events CredentialIssued où l'issuer correspond
     const issuedFilter = contract.filters.CredentialIssued(null, issuerAddress);
     const issuedEvents = await contract.queryFilter(issuedFilter, fromBlock);
     
-    // Filtrer les events CredentialRevoked où l'issuer correspond
     const revokedFilter = contract.filters.CredentialRevoked(null, issuerAddress);
     const revokedEvents = await contract.queryFilter(revokedFilter, fromBlock);
     
@@ -172,20 +165,18 @@ async function loadTransactions(issuerAddress: string): Promise<TxEvent[]> {
       const decoded = contract.interface.parseLog(event);
       if (!decoded) continue;
       const credentialId = decoded.args.credentialId;
-      const holder = undefined; // L'event CredentialRevoked ne contient pas holder par défaut, mais on peut le récupérer depuis le credential
       const txHash = event.transactionHash;
       const timestamp = (await event.getBlock()).timestamp;
       events.push({
         id: `${credentialId}_revoked`,
         type: "revoked",
         credentialId,
-        holder,
+        holder: undefined,
         txHash,
         timestamp: timestamp * 1000,
       });
     }
     
-    // Trier par timestamp décroissant
     events.sort((a, b) => b.timestamp - a.timestamp);
     return events;
   } catch (err) {
@@ -199,7 +190,6 @@ async function loadPendingRequests(issuerAddress: string): Promise<CredentialReq
     const res = await fetch(`http://localhost:8083/credential-requests?issuer=${issuerAddress}&status=pending`);
     if (!res.ok) return [];
     const data = await res.json();
-    // Transformer les champs du backend vers ceux attendus par le composant PendingRequests
     return (data.requests || []).map((req: any) => ({
       id: req.id,
       holder: req.holder,
@@ -208,7 +198,6 @@ async function loadPendingRequests(issuerAddress: string): Promise<CredentialReq
       status: req.status,
       requestedAt: req.requested_at * 1000,
     }));
-
   } catch (err) {
     console.error("loadPendingRequests error:", err);
     return [];
@@ -217,7 +206,6 @@ async function loadPendingRequests(issuerAddress: string): Promise<CredentialReq
 
 async function enrichRequestsWithHolderInfo(requests: any[]): Promise<CredentialRequest[]> {
   const enriched = await Promise.all(requests.map(async (req) => {
-    // req contient déjà id, holder, credentialType, message, status, requestedAt (en ms)
     let holderName = "";
     let holderDid = "";
     let holderPublicKey = "";
@@ -236,9 +224,8 @@ async function enrichRequestsWithHolderInfo(requests: any[]): Promise<Credential
     } catch (err) {
       console.error(`Failed to fetch holder info for ${req.holder}:`, err);
     }
-    // Conserver toutes les propriétés déjà existantes, ajouter les nouvelles
     return {
-      ...req,               // garde id, holder, credentialType, message, status, requestedAt
+      ...req,
       holderName,
       holderDid,
       holderPublicKey,
@@ -256,8 +243,7 @@ function IssuerDashboard() {
   const [events, setEvents] = useState<TxEvent[]>([]);
   const [notifOpen, setNotifOpen] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [issuing, setIssuing] = useState(false); // état pour le bouton d'émission
-
+  const [issuing, setIssuing] = useState(false);
 
   useEffect(() => {
     const init = async () => {
@@ -289,12 +275,10 @@ function IssuerDashboard() {
         const creds = await loadIssuedCredentials(addr);
         setCredentials(creds);
 
-        // Chargement des demandes en attente depuis le backend
         const pendingReqs = await loadPendingRequests(addr);
         const enrichedReqs = await enrichRequestsWithHolderInfo(pendingReqs);
         setRequests(enrichedReqs);
 
-      
         const txs = await loadTransactions(addr);
         setEvents(txs);
 
@@ -317,8 +301,14 @@ function IssuerDashboard() {
     return { total, active, revoked, expired, pending };
   }, [credentials, requests]);
 
-  // ========== HANDLE ISSUE (ÉMISSION D'UN CREDENTIAL) ==========
-  const handleIssue = async (req: CredentialRequest, expiration: number | null, file: File) => {
+  // ========== HANDLE ISSUE MODIFIÉE ==========
+  const handleIssue = async (
+    req: CredentialRequest,
+    expiration: number | null,
+    file: File,
+    claims: Record<string, any>,
+      score: number      
+  ) => {
     if (!file) {
       toast.error("Veuillez sélectionner un document");
       return;
@@ -335,40 +325,28 @@ function IssuerDashboard() {
       const fileBuffer = await file.arrayBuffer();
       const fileBytes = new Uint8Array(fileBuffer);
       const docHash = ethers.keccak256(fileBytes);
-
-      // 2. Simulation EdgeDoc AI : génération d'un masque et d'un score
-      //    (à remplacer par un vrai appel à votre service)
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      const maskData = new TextEncoder().encode(`AI-segmentation-mask-for-${docHash}`);
-      const { cid: maskCID } = await ipfs.add(maskData);
-      const maskHash = ethers.keccak256(maskData);
-      const classificationScore = 98.5; // score de confiance
-
-      // 3. Récupération des clés privées de l'issuer (déchiffrement via PRF)
+      // 3. Récupération des clés privées de l'issuer
       const encryptedData = await loadEncryptedMLDSAKey(profile.walletAddress);
       if (!encryptedData) throw new Error("Clé privée introuvable");
       const prfKey = await getPRFKey(encryptedData.credentialId);
       const decryptedJson = await decryptWithPRF(prfKey, encryptedData.ciphertext, encryptedData.iv);
-      const privateKeys = JSON.parse(decryptedJson); // { pq_secret, classical_secret, pq_public, classical_public }
+      const privateKeys = JSON.parse(decryptedJson);
 
-      // 4. Construction du payload composite (tous les éléments liés)
+      // 4. Construction du payload composite (inclut les claims ? Non, le composite est pour la signature)
       const now = Date.now();
       const compositePayload = {
-        docHash,
-        maskHash,
-        classificationScore: Math.round(classificationScore * 100), // entier
+        classificationScore: Math.round(score * 100),
         holder: req.holder,
         issuer: profile.walletAddress,
         issuedAt: now,
         expiryDate: expiration || null,
         credentialType: req.credentialType,
       };
-      // Sérialisation déterministe (tri des clés)
       const sortedKeys = Object.keys(compositePayload).sort();
       const compositeString = JSON.stringify(compositePayload, sortedKeys);
       const compositeHash = ethers.keccak256(ethers.toUtf8Bytes(compositeString));
 
-      // 5. Signature du compositeHash par l'issuer (via backend)
+      // 5. Signature du compositeHash
       const payloadB64 = btoa(compositeString);
       const signResponse = await fetch(`${API_BASE}/sign`, {
         method: 'POST',
@@ -389,13 +367,11 @@ function IssuerDashboard() {
       }
       const signatureData = await signResponse.json();
 
-      // 6. Stockage sur IPFS du bundle complet (credential + signature)
+      // 6. Bundle IPFS avec claims et localisation
       const credentialBundle = {
         name: req.credentialType,
-        docHash,
-        maskHash,
-        maskCID: maskCID.toString(),
-        classificationScore,
+        docHash,                 // ← carte de localisation EdgeDoc
+        classificationScore: score,
         compositeHash,
         signature: signatureData.signature_json,
         signatureId: signatureData.signature_id,
@@ -404,13 +380,14 @@ function IssuerDashboard() {
         issuedAt: now,
         expiryDate: expiration,
         credentialType: req.credentialType,
-        aiVerified: true, // à remplacer par le vrai résultat d'EdgeDoc
+        aiVerified: true,           // ou utiliser le score
+        claims,                     // ← les attributs extraits (claims pour ZKP)
       };
       const bundleBuffer = new TextEncoder().encode(JSON.stringify(credentialBundle));
       const { cid: bundleCID } = await ipfs.add(bundleBuffer);
       const ipfsCID = bundleCID.toString();
 
-      // 7. Métadonnées (affichage frontend)
+      // 7. Métadonnées (pour l'affichage dans le contrat)
       const metadata = {
         credentialType: req.credentialType,
         message: req.message || "",
@@ -421,10 +398,10 @@ function IssuerDashboard() {
       const { cid: metadataCID } = await ipfs.add(metadataBuffer);
       const metadataCIDString = metadataCID.toString();
 
-      // 8. Appel au contrat CredentialRegistry
+      // 8. Appel au contrat
       const expiresAtSeconds = expiration ? Math.floor(expiration / 1000) : 0;
       const credentialId = await issueCredential(
-        compositeHash,        // docHash du contrat (on y stocke le compositeHash)
+        compositeHash,
         ipfsCID,
         req.holder,
         expiresAtSeconds,
@@ -433,14 +410,14 @@ function IssuerDashboard() {
 
       toast.success(`Credential émis avec succès ! ID: ${credentialId}`);
 
-      // 9. Mise à jour de la demande dans le backend
+      // 9. Mise à jour de la demande
       await fetch(`${API_BASE}/credential-requests/${req.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: "approved", credentialId }),
       });
 
-      // 10. Rafraîchir les listes
+      // 10. Rafraîchir
       const pendingReqs = await loadPendingRequests(profile.walletAddress);
       const enrichedReqs = await enrichRequestsWithHolderInfo(pendingReqs);
       setRequests(enrichedReqs);
@@ -460,7 +437,6 @@ function IssuerDashboard() {
   };
 
   const handleRevoke = (id: string, _reason: string) => {
-    // Implémenter l’appel au contrat pour révoquer
     toast.info("Fonctionnalité à implémenter");
   };
 
@@ -526,7 +502,6 @@ function IssuerDashboard() {
                 <button
                   onClick={() => setNotifOpen((v) => !v)}
                   className="relative inline-flex h-10 w-10 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:text-foreground transition-colors"
-                  aria-label="Notifications"
                 >
                   <Bell className="h-5 w-5" />
                   {requests.length > 0 && (
@@ -575,7 +550,12 @@ function IssuerDashboard() {
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="lg:col-span-1">
-              <PendingRequests requests={requests} onIssue={handleIssue} onReject={handleReject} />
+              <PendingRequests
+                requests={requests}
+                onIssue={handleIssue}
+                onReject={handleReject}
+                issuerAddress={profile.walletAddress}
+              />
             </div>
             <div className="lg:col-span-2">
               <IssuanceChart credentials={credentials} />
