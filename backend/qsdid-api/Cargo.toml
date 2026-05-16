@@ -32,3 +32,7 @@ pqc_ml_kem = { version = "0.1.0", path = "../identity_workspace/pqc_ml_kem" }
 totp-rs = "5.4"
 
 base32 = "0.5.1"
+
+# ZK Stark related dependencies
+stone-prover-sdk = { git = "https://github.com/Moonsong-Labs/stone-prover-sdk" }
+cairo-vm-sdk = { git = "https://github.com/Moonsong-Labs/cairo-vm-sdk" }

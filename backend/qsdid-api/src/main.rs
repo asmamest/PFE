@@ -54,6 +54,8 @@ struct AppState {
     totp_secrets: Arc<Mutex<HashMap<String, String>>>,
     issuers: Arc<Mutex<Vec<IssuerInfo>>>, 
     credential_requests: Arc<Mutex<HashMap<String, CredentialRequest>>>,
+    failed_attempts: Arc<Mutex<HashMap<String, u32>>>,
+
 
 }
 
@@ -1089,6 +1091,27 @@ async fn update_credential_request(
     }
 }
 
+async fn record_failed_attempt(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let issuer = req.get("issuer").and_then(|v| v.as_str()).unwrap_or("");
+    if issuer.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Missing issuer" })));
+    }
+
+    let mut attempts = state.failed_attempts.lock().unwrap();
+    let count = attempts.entry(issuer.to_string()).or_insert(0);
+    *count += 1;
+    let banned = *count >= 3;
+    save_failed_attempts(&attempts);
+
+    (StatusCode::OK, Json(json!({
+        "totalFails": *count,
+        "banned": banned
+    })))
+}
+
 // GET /issuers
 async fn list_issuers(State(state): State<AppState>) -> impl IntoResponse {
     let issuers = state.issuers.lock().unwrap();
@@ -1280,6 +1303,23 @@ fn save_credential_requests(requests: &HashMap<String, CredentialRequest>) {
     fs::write(CREDENTIAL_REQUESTS_FILE, data).unwrap();
 }
 
+
+const FAILED_ATTEMPTS_FILE: &str = "failed_attempts.json";
+
+fn load_failed_attempts() -> HashMap<String, u32> {
+    if !StdPath::new(FAILED_ATTEMPTS_FILE).exists() {
+        return HashMap::new();
+    }
+    let data = fs::read_to_string(FAILED_ATTEMPTS_FILE).unwrap_or_default();
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn save_failed_attempts(attempts: &HashMap<String, u32>) {
+    let data = serde_json::to_string_pretty(attempts).unwrap();
+    fs::write(FAILED_ATTEMPTS_FILE, data).unwrap();
+}
+
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -1300,7 +1340,7 @@ async fn main() {
         totp_secrets: Arc::new(Mutex::new(load_totp_secrets())), 
         issuers: Arc::new(Mutex::new(load_issuers())), 
         credential_requests: Arc::new(Mutex::new(load_credential_requests())),
-
+        failed_attempts: Arc::new(Mutex::new(load_failed_attempts())),
 
     };
     
@@ -1340,6 +1380,7 @@ async fn main() {
         .route("/credential-requests/{id}", put(update_credential_request))
         .route("/issuers", get(list_issuers))
         .route("/issuers", post(register_issuer))
+        .route("/record-failed-attempt", post(record_failed_attempt))
         .layer(cors)
         .with_state(state);
 
